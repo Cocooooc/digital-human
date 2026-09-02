@@ -1,6 +1,11 @@
-# 大文件 / 模型（重新下载即可，不用进 git）
+# Model weights and media — re-downloadable, too large for git
 *.wav
 *.mp3
+*.vrm
+*.vrma
+*.glb
+*.gltf
+*.fbx
 qwen3-4b/
 qwen3-tts/
 phi3-mini/
@@ -16,7 +21,7 @@ __pycache__/
 .venv/
 venv/
 
-# 系统文件
+# OS
 .DS_Store
 Thumbs.db
 
@@ -24,6 +29,6 @@ Thumbs.db
 .vscode/
 .idea/
 
-# 日志
+# Logs
 *.log
 nohup.out

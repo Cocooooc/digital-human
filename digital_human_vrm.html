@@ -44,12 +44,18 @@
   .loader-msg {
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
-    text-align: center; padding: 24px;
-    font-size: 13px; color: var(--text-dim); line-height: 1.6;
+    padding: 24px;
   }
-  .loader-msg code {
+  /* The message goes in this inner block — putting mixed inline content
+     directly in a flex container makes every text node its own flex item,
+     which scatters the sentence across the box. */
+  .loader-inner {
+    text-align: center; max-width: 420px;
+    font-size: 13px; color: var(--text-dim); line-height: 1.65;
+  }
+  .loader-inner code {
     background: var(--bg); padding: 1px 5px; border-radius: 4px;
-    font-size: 12px;
+    font-size: 12px; white-space: nowrap;
   }
 
   .level-track {
@@ -155,7 +161,9 @@
   <div class="stage">
     <div id="viewport">
       <div class="loader-msg" id="loaderMsg">
-        Place a <code>.vrm</code> file next to this page and pick it below.
+        <div class="loader-inner" id="loaderInner">
+          Choose a <code>.vrm</code> or <code>.glb</code> model below to begin.
+        </div>
       </div>
     </div>
     <div class="level-track">
@@ -171,8 +179,10 @@
   </div>
 
   <div class="settings">
-    <input type="text" id="modelPath" value="avatar.vrm" placeholder="model filename, e.g. avatar.vrm" />
+    <input type="text" id="modelPath" value="avatar.vrm" placeholder="filename in this folder" />
     <button id="loadModelBtn">Load</button>
+    <button id="pickFileBtn">Choose file…</button>
+    <input type="file" id="filePicker" accept=".vrm,.glb" hidden />
   </div>
 
   <div class="settings">
@@ -224,6 +234,7 @@ import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 
 const viewport = document.getElementById("viewport");
 const loaderMsg = document.getElementById("loaderMsg");
+const loaderInner = document.getElementById("loaderInner");
 const exprList = document.getElementById("exprList");
 
 const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
@@ -281,6 +292,39 @@ const EMOTION_MAP = {
 const EMOTION_KEYS = ["happy", "sad", "angry", "relaxed", "surprised"];
 const VISEMES = ["aa", "ih", "ou", "ee", "oh"];
 
+// VRM 0.x and 1.0 name the same expressions differently, and models in the
+// wild use either. Each canonical name is resolved against what the loaded
+// model actually exposes, trying the 1.0 name first and falling back to the
+// 0.x one. Note VRM 0.x has no "surprised" at all — that one simply won't
+// resolve on older models, and is skipped rather than faked.
+const EXPRESSION_ALIASES = {
+  happy:     ["happy", "joy"],
+  sad:       ["sad", "sorrow"],
+  angry:     ["angry"],
+  relaxed:   ["relaxed", "fun"],
+  surprised: ["surprised"],
+  aa:        ["aa", "a"],
+  ih:        ["ih", "i"],
+  ou:        ["ou", "u"],
+  ee:        ["ee", "e"],
+  oh:        ["oh", "o"],
+  blink:     ["blink"],
+};
+
+// canonical name -> the name this particular model understands (or null)
+const resolvedNames = {};
+
+function resolveExpressionNames() {
+  for (const [canonical, aliases] of Object.entries(EXPRESSION_ALIASES)) {
+    resolvedNames[canonical] = aliases.find((a) => availableExpressions.has(a)) ?? null;
+  }
+}
+
+function applyExpression(canonical, value) {
+  const name = resolvedNames[canonical];
+  if (name) vrm.expressionManager.setValue(name, value);
+}
+
 // Current vs target weights, eased every frame so expressions move rather than snap.
 const exprCurrent = {};
 const exprTarget = {};
@@ -289,12 +333,20 @@ for (const k of [...EMOTION_KEYS, ...VISEMES]) { exprCurrent[k] = 0; exprTarget[
 function setEmotion(name) {
   const mix = EMOTION_MAP[name] || EMOTION_MAP.neutral;
   for (const k of EMOTION_KEYS) exprTarget[k] = mix[k] || 0;
+
+  // VRM 0.x has no "surprised" expression at all. Rather than showing nothing,
+  // approximate it with what those models do have: a bright, open look.
+  if (name === "surprised" && !resolvedNames.surprised) {
+    exprTarget.happy = 0.4;
+    exprTarget.relaxed = 0;
+  }
+
   document.getElementById("emotionChip").textContent = "· " + name;
 }
 
-async function loadVRM(path) {
+async function loadVRM(path, label = path) {
   loaderMsg.style.display = "flex";
-  loaderMsg.textContent = "Loading " + path + "…";
+  loaderInner.textContent = "Loading " + label + "…";
   sessionBtn.disabled = true;
 
   if (vrm) {
@@ -323,9 +375,23 @@ async function loadVRM(path) {
     availableExpressions = new Set(
       (vrm.expressionManager?.expressions ?? []).map((e) => e.expressionName)
     );
-    exprList.textContent = availableExpressions.size
-      ? "expressions: " + [...availableExpressions].join(", ")
-      : "this model exposes no expressions — face will not emote or lip-sync";
+    resolveExpressionNames();
+
+    if (!availableExpressions.size) {
+      exprList.textContent =
+        "this model exposes no expressions — the face will not emote or lip-sync";
+    } else {
+      const driven = Object.entries(resolvedNames)
+        .filter(([, n]) => n)
+        .map(([c, n]) => (c === n ? c : `${c}→${n}`));
+      const missing = Object.entries(resolvedNames)
+        .filter(([, n]) => !n)
+        .map(([c]) => c);
+      exprList.innerHTML =
+        `<b>driving:</b> ${driven.join(", ")}` +
+        (missing.length ? `<br><b>not in this model:</b> ${missing.join(", ")}` : "") +
+        `<br><b>all expressions:</b> ${[...availableExpressions].join(", ")}`;
+    }
 
     frameHead();
 
@@ -334,13 +400,37 @@ async function loadVRM(path) {
   } catch (err) {
     console.error(err);
     loaderMsg.style.display = "flex";
-    loaderMsg.innerHTML =
-      `Could not load <code>${path}</code>.<br>` +
-      `${err.message}<br><br>` +
-      `Put the .vrm file in the same folder as this page and make sure the ` +
-      `filename matches exactly.`;
+    const viaFileProtocol = location.protocol === "file:";
+    loaderInner.innerHTML =
+      `Could not load <code>${label}</code>.<br>${err.message}<br><br>` +
+      (viaFileProtocol
+        ? `This page was opened directly from disk (<code>file://</code>), which ` +
+          `blocks both model loading and microphone access. Serve the folder ` +
+          `instead:<br><br><code>python -m http.server 8000</code><br>` +
+          `then open <code>http://localhost:8000/${location.pathname.split("/").pop()}</code>`
+        : `Use <b>Choose file…</b> to pick the model from anywhere, or put it in ` +
+          `this page's folder and type its exact name. ` +
+          `<code>.glb</code> files exported by VRoid work too.`);
   }
 }
+
+// A file picker sidesteps filenames with spaces, and lets the model live
+// anywhere rather than having to sit next to this page.
+document.getElementById("pickFileBtn").onclick = () =>
+  document.getElementById("filePicker").click();
+
+// The blob URL must stay valid for the whole load — three.js resolves textures
+// and buffers asynchronously after loadAsync() settles — so the previous one is
+// released only when the next model is picked.
+let pickedModelUrl = null;
+
+document.getElementById("filePicker").onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (pickedModelUrl) URL.revokeObjectURL(pickedModelUrl);
+  pickedModelUrl = URL.createObjectURL(file);
+  loadVRM(pickedModelUrl, file.name);
+};
 
 function frameHead() {
   // Aim the camera using the model's own head bone, so it works regardless of
@@ -395,15 +485,13 @@ function animate() {
     // Expressions ease slowly; the mouth must keep up with speech, so faster.
     for (const k of EMOTION_KEYS) {
       exprCurrent[k] = ease(exprCurrent[k], exprTarget[k], 0.08);
-      if (availableExpressions.has(k)) vrm.expressionManager.setValue(k, exprCurrent[k]);
+      applyExpression(k, exprCurrent[k]);
     }
     for (const k of VISEMES) {
       exprCurrent[k] = ease(exprCurrent[k], exprTarget[k], 0.45);
-      if (availableExpressions.has(k)) vrm.expressionManager.setValue(k, exprCurrent[k]);
+      applyExpression(k, exprCurrent[k]);
     }
-    if (availableExpressions.has("blink")) {
-      vrm.expressionManager.setValue("blink", blinkValue);
-    }
+    applyExpression("blink", blinkValue);
 
     // Breathing and a slow head drift.
     const head = vrm.humanoid?.getNormalizedBoneNode("head");
@@ -840,7 +928,23 @@ resetBtn.onclick = async () => {
 setEmotion("neutral");
 setPhase("idle");
 animate();
-loadVRM(document.getElementById("modelPath").value.trim());
+
+if (location.protocol === "file:") {
+  // Opened by double-clicking the file. Browsers deny microphone access and
+  // block fetches outside HTTPS/localhost, so nothing here can work — say so
+  // up front rather than letting it fail confusingly later.
+  loaderMsg.style.display = "flex";
+  loaderInner.innerHTML =
+    `<b>Open this page through a local server, not from disk.</b><br><br>` +
+    `Browsers only grant microphone access on <code>localhost</code> or HTTPS, ` +
+    `and <code>file://</code> also blocks loading the model.<br><br>` +
+    `In the folder containing this file, run<br>` +
+    `<code>python -m http.server 8000</code><br>` +
+    `then open <code>http://localhost:8000/${location.pathname.split("/").pop()}</code>`;
+  sessionBtn.disabled = true;
+} else {
+  loadVRM(document.getElementById("modelPath").value.trim());
+}
 </script>
 </body>
 </html>
