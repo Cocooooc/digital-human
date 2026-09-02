@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Digital Human — Voice Chat</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 640px;
+    margin: 40px auto;
+    padding: 0 20px;
+    color: #1a1a1a;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 24px; }
+
+  .row { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }
+  input[type=text] {
+    flex: 1; padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px;
+    font-size: 13px;
+  }
+  label.mode { font-size: 13px; color: #444; display: flex; align-items: center; gap: 4px; }
+
+  button {
+    padding: 12px 20px; border: none; border-radius: 8px; font-size: 15px;
+    cursor: pointer; font-weight: 600;
+  }
+  #recordBtn { background: #2563eb; color: white; width: 100%; }
+  #recordBtn.recording { background: #dc2626; }
+  #resetBtn { background: #f3f4f6; color: #444; font-size: 12px; padding: 6px 12px; }
+
+  #status { margin: 16px 0; font-size: 13px; color: #666; min-height: 18px; }
+
+  .bubble {
+    padding: 10px 14px; border-radius: 10px; margin-bottom: 8px; font-size: 14px;
+    line-height: 1.5;
+  }
+  .bubble.user { background: #eef2ff; }
+  .bubble.assistant { background: #f0fdf4; }
+  .bubble .label { font-size: 11px; color: #888; margin-bottom: 2px; }
+
+  #log { margin-top: 20px; }
+
+  .metrics {
+    font-size: 11px; color: #999; margin-top: 4px; font-family: monospace;
+  }
+</style>
+</head>
+<body>
+
+<h1>Digital Human — Voice Chat</h1>
+<div class="sub">ASR (FunASR) &rarr; LLM (Qwen3-4B) &rarr; TTS (Qwen3-TTS voice clone)</div>
+
+<div class="row">
+  <input type="text" id="serverUrl" value="http://localhost:15333" />
+</div>
+
+<div class="row">
+  <label class="mode"><input type="radio" name="mode" value="stream" checked> Streaming</label>
+  <label class="mode"><input type="radio" name="mode" value="nonstream"> Non-streaming</label>
+  <button id="resetBtn">Reset memory</button>
+</div>
+
+<button id="recordBtn">Hold to talk (click to start / stop)</button>
+<div id="status"></div>
+
+<div id="log"></div>
+
+<script>
+const serverUrlInput = document.getElementById("serverUrl");
+const recordBtn = document.getElementById("recordBtn");
+const resetBtn = document.getElementById("resetBtn");
+const statusEl = document.getElementById("status");
+const logEl = document.getElementById("log");
+
+let mediaRecorder = null;
+let chunks = [];
+let isRecording = false;
+
+// --- audio playback queue: play segments strictly in order ------------
+const playQueue = [];
+let isPlaying = false;
+
+function enqueueAudio(base64Wav) {
+  const bytes = atob(base64Wav);
+  const arr = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+  const blob = new Blob([arr], { type: "audio/wav" });
+  playQueue.push(URL.createObjectURL(blob));
+  if (!isPlaying) playNext();
+}
+
+function playNext() {
+  if (playQueue.length === 0) {
+    isPlaying = false;
+    return;
+  }
+  isPlaying = true;
+  const url = playQueue.shift();
+  const audio = new Audio(url);
+  audio.onended = () => {
+    URL.revokeObjectURL(url);
+    playNext();
+  };
+  audio.play();
+}
+
+// --- recording -----------------------------------------------------------
+
+recordBtn.onclick = async () => {
+  if (!isRecording) {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    chunks = [];
+    mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+    mediaRecorder.onstop = handleRecordingStop;
+    mediaRecorder.start();
+    isRecording = true;
+    recordBtn.textContent = "Stop";
+    recordBtn.classList.add("recording");
+    statusEl.textContent = "Recording...";
+  } else {
+    mediaRecorder.stop();
+    mediaRecorder.stream.getTracks().forEach((t) => t.stop());
+    isRecording = false;
+    recordBtn.textContent = "Hold to talk (click to start / stop)";
+    recordBtn.classList.remove("recording");
+  }
+};
+
+resetBtn.onclick = async () => {
+  const base = serverUrlInput.value.replace(/\/$/, "");
+  await fetch(base + "/reset", { method: "POST" });
+  logEl.innerHTML = "";
+  statusEl.textContent = "Memory cleared.";
+};
+
+async function handleRecordingStop() {
+  const blob = new Blob(chunks, { type: "audio/webm" });
+  const mode = document.querySelector('input[name=mode]:checked').value;
+  const base = serverUrlInput.value.replace(/\/$/, "");
+
+  statusEl.textContent = "Sending...";
+  const form = new FormData();
+  form.append("file", blob, "input.webm");
+
+  if (mode === "nonstream") {
+    await sendNonStreaming(base, form);
+  } else {
+    await sendStreaming(base, form);
+  }
+}
+
+async function sendNonStreaming(base, form) {
+  const t0 = performance.now();
+  const resp = await fetch(base + "/chat", { method: "POST", body: form });
+  const userText = resp.headers.get("X-User-Text") || "";
+  const replyText = resp.headers.get("X-Reply-Text") || "";
+  const wavBlob = await resp.blob();
+  const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+
+  addBubble("user", userText);
+  addBubble("assistant", replyText, `total: ${elapsed}s`);
+
+  const url = URL.createObjectURL(wavBlob);
+  new Audio(url).play();
+  statusEl.textContent = "Done.";
+}
+
+async function sendStreaming(base, form) {
+  const t0 = performance.now();
+  const resp = await fetch(base + "/chat_stream", { method: "POST", body: form });
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let userBubbleAdded = false;
+  let assistantText = "";
+  let assistantBubble = null;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+
+    let lines = buf.split("\n");
+    buf = lines.pop(); // last (possibly incomplete) line stays in buf
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line);
+
+      if (event.type === "asr") {
+        addBubble("user", event.text);
+        userBubbleAdded = true;
+        statusEl.textContent = "Thinking...";
+      } else if (event.type === "audio") {
+        assistantText += event.text;
+        if (!assistantBubble) {
+          assistantBubble = addBubble("assistant", assistantText);
+        } else {
+          assistantBubble.querySelector(".text").textContent = assistantText;
+        }
+        enqueueAudio(event.wav);
+      } else if (event.type === "done") {
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+        if (assistantBubble) {
+          const m = document.createElement("div");
+          m.className = "metrics";
+          m.textContent = `first audio: ${event.first_audio}s | total: ${event.total}s | segments: ${event.segments} | round-trip: ${elapsed}s`;
+          assistantBubble.appendChild(m);
+        }
+        statusEl.textContent = "Done.";
+      }
+    }
+  }
+}
+
+function addBubble(role, text, metrics) {
+  const div = document.createElement("div");
+  div.className = "bubble " + role;
+  const label = document.createElement("div");
+  label.className = "label";
+  label.textContent = role === "user" ? "You" : "Assistant";
+  const textEl = document.createElement("div");
+  textEl.className = "text";
+  textEl.textContent = text;
+  div.appendChild(label);
+  div.appendChild(textEl);
+  if (metrics) {
+    const m = document.createElement("div");
+    m.className = "metrics";
+    m.textContent = metrics;
+    div.appendChild(m);
+  }
+  logEl.appendChild(div);
+  return div;
+}
+</script>
+
+</body>
+</html>

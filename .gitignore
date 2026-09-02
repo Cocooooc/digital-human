@@ -1,0 +1,29 @@
+# 大文件 / 模型（重新下载即可，不用进 git）
+*.wav
+*.mp3
+qwen3-4b/
+qwen3-tts/
+phi3-mini/
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# 日志
+*.log
+nohup.out
