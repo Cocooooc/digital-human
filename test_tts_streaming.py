@@ -23,7 +23,10 @@ import soundfile as sf
 
 MODEL_PATH = "/root/qwen3-tts"
 REF_AUDIO = "/root/test10s.wav"
-REF_TEXT = "一个游戏开发小组当中遇到的一段经历。那我在这个小组当中呢，负责的是。"
+# Source: FunASR official sample audio
+# (https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/asr_example_zh.wav),
+# transcribed with our own ASR model.
+REF_TEXT = "欢迎大家来体验达摩院推出的语音识别模型。"
 TEST_TEXT = "你好，很高兴认识你。今天天气不错，我们聊聊你最近在忙什么呢？"
 
 

@@ -66,11 +66,32 @@ bash setup.sh
 
 `setup.sh` installs dependencies and downloads the LLM/TTS models via ModelScope.
 
-Then upload a reference audio clip for voice cloning (not tracked in git):
+Then get a reference audio clip for voice cloning (not tracked in git, since
+it's a binary asset — but here's how to regenerate the one currently used by
+`REF_TEXT` in `server_stream.py` if it's ever lost):
 
 ```bash
-scp -P <port> test10s.wav root@<server-ip>:/root/digital-human/
+# Download the FunASR official sample clip and normalize it to 16kHz mono
+wget https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/asr_example_zh.wav -O /root/test10s.wav
+ffmpeg -y -i /root/test10s.wav -ar 16000 -ac 1 -c:a pcm_s16le /root/test10s_16k.wav
+mv /root/test10s_16k.wav /root/test10s.wav
 ```
+
+`REF_TEXT` must match this clip word-for-word — it was transcribed with our
+own ASR model. To reproduce it or verify it after swapping the clip:
+
+```bash
+python -c "
+from funasr import AutoModel
+model = AutoModel(model='paraformer-zh', vad_model='fsmn-vad', punc_model='ct-punc', device='cuda:0')
+res = model.generate(input='/root/test10s.wav')
+print(res[0]['text'])
+"
+```
+
+To use your own voice instead, record ~10s of clear speech, run it through
+the same transcription step, and update `REF_TEXT` in `server_stream.py`
+(and `test_tts_streaming.py`) to match.
 
 Start the server:
 

@@ -47,7 +47,11 @@ LLM_PATH = "/root/qwen3-4b"
 TTS_PATH = "/root/qwen3-tts"
 REF_AUDIO = "/root/test10s.wav"
 # Must match, word for word, what is actually said in REF_AUDIO.
-REF_TEXT = "一个游戏开发小组当中遇到的一段经历。那我在这个小组当中呢，负责的是。"
+# Source: FunASR official sample audio
+# (https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/asr_example_zh.wav),
+# transcribed with our own ASR model — see README for how to regenerate this
+# if the reference audio changes.
+REF_TEXT = "欢迎大家来体验达摩院推出的语音识别模型。"
 
 ASR_SAMPLE_RATE = 16000
 HISTORY_TURNS = 6  # keep the last N user/assistant turn pairs
