@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Digital Human — VRM</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --surface: #ffffff; --border: #e3e3e6;
+    --text: #1a1a1c; --text-dim: #6b6b70;
+    --accent: #2563eb; --accent-hot: #dc2626; --live: #16a34a;
+    --user-bubble: #eef2ff; --bot-bubble: #f0fdf4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a; --surface: #1e1e23; --border: #2e2e35;
+      --text: #eeeef0; --text-dim: #9a9aa2;
+      --user-bubble: #1e2a4a; --bot-bubble: #17301f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    display: flex; justify-content: center; padding: 24px 16px 40px;
+  }
+  .app { width: 100%; max-width: 560px; }
+  header { margin-bottom: 18px; }
+  h1 { font-size: 17px; margin: 0 0 3px; font-weight: 650; }
+  .sub { color: var(--text-dim); font-size: 12.5px; }
+
+  .stage {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; padding: 16px 20px 20px;
+    display: flex; flex-direction: column; align-items: center;
+    margin-bottom: 14px;
+  }
+  #viewport {
+    width: 100%; height: 340px; border-radius: 10px; overflow: hidden;
+    position: relative; background: transparent;
+  }
+  #viewport canvas { display: block; width: 100%; height: 100%; }
+
+  .loader-msg {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    text-align: center; padding: 24px;
+    font-size: 13px; color: var(--text-dim); line-height: 1.6;
+  }
+  .loader-msg code {
+    background: var(--bg); padding: 1px 5px; border-radius: 4px;
+    font-size: 12px;
+  }
+
+  .level-track {
+    width: 200px; height: 5px; background: var(--border);
+    border-radius: 3px; margin-top: 14px; position: relative;
+  }
+  .level-fill {
+    height: 100%; width: 0%; background: var(--live);
+    border-radius: 3px; transition: width .06s linear;
+  }
+  .threshold-mark {
+    position: absolute; top: -3px; width: 2px; height: 11px;
+    background: var(--accent-hot); border-radius: 1px; transition: left .3s ease;
+  }
+  .floor-readout {
+    margin-top: 6px; font-size: 10.5px; color: var(--text-dim);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; min-height: 14px;
+  }
+  .state-row {
+    margin-top: 8px; display: flex; align-items: center; gap: 7px;
+    font-size: 11.5px; color: var(--text-dim);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: .03em; min-height: 16px;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex-shrink: 0; }
+  .dot.live { background: var(--live); animation: pulse 1.6s ease-in-out infinite; }
+  .dot.rec { background: var(--accent-hot); }
+  .dot.busy { background: var(--accent); }
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.35 } }
+
+  .controls { display: flex; gap: 8px; margin-bottom: 14px; }
+  button {
+    font: inherit; border: 1px solid var(--border); border-radius: 10px;
+    padding: 11px 16px; background: var(--surface); color: var(--text);
+    cursor: pointer; font-size: 14px;
+  }
+  button:hover { border-color: var(--text-dim); }
+  button:disabled { opacity: .45; cursor: default; }
+  #sessionBtn {
+    flex: 1; background: var(--accent); border-color: var(--accent);
+    color: #fff; font-weight: 600;
+  }
+  #sessionBtn.active { background: var(--accent-hot); border-color: var(--accent-hot); }
+
+  .settings { display: flex; gap: 8px; margin-bottom: 14px; align-items: center; }
+  input[type=text], select {
+    flex: 1; font: inherit; font-size: 12.5px; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface); color: var(--text);
+  }
+
+  details.tuning {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; font-size: 12.5px;
+  }
+  details.tuning summary { cursor: pointer; color: var(--text-dim); }
+  .slider-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+  .slider-row label { flex: 0 0 130px; color: var(--text-dim); font-size: 12px; }
+  .slider-row input[type=range] { flex: 1; }
+  .slider-row output {
+    flex: 0 0 46px; text-align: right;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px; color: var(--text-dim);
+  }
+  .hint { color: var(--text-dim); font-size: 11.5px; margin-top: 8px; line-height: 1.45; }
+  .expr-list {
+    margin-top: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px; color: var(--text-dim); word-break: break-all; line-height: 1.5;
+  }
+
+  .bubble { padding: 10px 13px; border-radius: 11px; margin-bottom: 7px; font-size: 14px; line-height: 1.5; }
+  .bubble.user { background: var(--user-bubble); }
+  .bubble.assistant { background: var(--bot-bubble); }
+  .bubble .who {
+    font-size: 10.5px; color: var(--text-dim); margin-bottom: 2px;
+    letter-spacing: .04em; text-transform: uppercase;
+  }
+  .metrics {
+    font-size: 10.5px; color: var(--text-dim); margin-top: 5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .interrupted { font-style: italic; opacity: .7; }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.3/lib/three-vrm.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <h1>Digital Human</h1>
+    <div class="sub">faster-whisper &rarr; Qwen3-4B &rarr; Kokoro &middot; VRM avatar</div>
+  </header>
+
+  <div class="stage">
+    <div id="viewport">
+      <div class="loader-msg" id="loaderMsg">
+        Place a <code>.vrm</code> file next to this page and pick it below.
+      </div>
+    </div>
+    <div class="level-track">
+      <div class="level-fill" id="levelFill"></div>
+      <div class="threshold-mark" id="thresholdMark"></div>
+    </div>
+    <div class="floor-readout" id="floorReadout"></div>
+    <div class="state-row">
+      <span class="dot" id="stateDot"></span>
+      <span id="stateText">idle</span>
+      <span id="emotionChip"></span>
+    </div>
+  </div>
+
+  <div class="settings">
+    <input type="text" id="modelPath" value="avatar.vrm" placeholder="model filename, e.g. avatar.vrm" />
+    <button id="loadModelBtn">Load</button>
+  </div>
+
+  <div class="settings">
+    <input type="text" id="serverUrl" value="http://180.127.11.177:15343" />
+    <button id="resetBtn">Reset</button>
+  </div>
+
+  <div class="controls">
+    <button id="sessionBtn" disabled>Start conversation</button>
+  </div>
+
+  <details class="tuning">
+    <summary>Voice detection settings</summary>
+    <div class="slider-row">
+      <label>Speech sensitivity</label>
+      <input type="range" id="thresholdSlider" min="3" max="40" value="10" />
+      <output id="thresholdOut">10</output>
+    </div>
+    <div class="slider-row">
+      <label>End-of-speech pause</label>
+      <input type="range" id="silenceSlider" min="300" max="2000" step="100" value="800" />
+      <output id="silenceOut">800ms</output>
+    </div>
+    <div class="slider-row">
+      <label>Interrupt sensitivity</label>
+      <input type="range" id="interruptSlider" min="8" max="60" value="22" />
+      <output id="interruptOut">22</output>
+    </div>
+    <div class="hint">
+      The noise floor is measured automatically at the start of each session; these
+      sliders set how far <em>above</em> it a sound must be. The red mark on the bar is
+      the live speech threshold. Headphones make interruption far more reliable.
+    </div>
+    <div class="expr-list" id="exprList"></div>
+  </details>
+
+  <div id="log"></div>
+
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
+
+// ===========================================================================
+// Scene
+// ===========================================================================
+
+const viewport = document.getElementById("viewport");
+const loaderMsg = document.getElementById("loaderMsg");
+const exprList = document.getElementById("exprList");
+
+const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+viewport.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+
+// Framed on the head — this is a talking-head interface, not a full-body view.
+const camera = new THREE.PerspectiveCamera(
+  22, viewport.clientWidth / viewport.clientHeight, 0.1, 20
+);
+
+// Three-point-ish lighting: without a fill, VRM faces read as flat and grey.
+scene.add(new THREE.AmbientLight(0xffffff, 1.4));
+const key = new THREE.DirectionalLight(0xffffff, 1.5);
+key.position.set(1, 1.6, 2.2);
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xdfe8ff, 0.55);
+fill.position.set(-1.5, 0.6, 1.2);
+scene.add(fill);
+
+addEventListener("resize", () => {
+  camera.aspect = viewport.clientWidth / viewport.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+});
+
+// ===========================================================================
+// VRM loading
+//
+// Expression names differ between VRM 0.x ("Joy", "Sorrow", "A") and VRM 1.0
+// ("happy", "sad", "aa"). three-vrm normalizes most of this, but models in the
+// wild still vary, so every name we intend to drive is resolved against what
+// the loaded model actually exposes, and anything missing is simply skipped.
+// ===========================================================================
+
+let vrm = null;
+let availableExpressions = new Set();
+const clock = new THREE.Clock();
+
+// Our six server-side emotions, expressed as weighted combinations of standard
+// VRM expressions. Combining is what gives "thinking" and "excited" a distinct
+// look despite VRM having no such presets.
+const EMOTION_MAP = {
+  neutral:   { relaxed: 0.15 },
+  happy:     { happy: 0.85 },
+  sad:       { sad: 0.8 },
+  surprised: { surprised: 0.9 },
+  thinking:  { relaxed: 0.35, sad: 0.18 },
+  excited:   { happy: 1.0, surprised: 0.32 },
+};
+const EMOTION_KEYS = ["happy", "sad", "angry", "relaxed", "surprised"];
+const VISEMES = ["aa", "ih", "ou", "ee", "oh"];
+
+// Current vs target weights, eased every frame so expressions move rather than snap.
+const exprCurrent = {};
+const exprTarget = {};
+for (const k of [...EMOTION_KEYS, ...VISEMES]) { exprCurrent[k] = 0; exprTarget[k] = 0; }
+
+function setEmotion(name) {
+  const mix = EMOTION_MAP[name] || EMOTION_MAP.neutral;
+  for (const k of EMOTION_KEYS) exprTarget[k] = mix[k] || 0;
+  document.getElementById("emotionChip").textContent = "· " + name;
+}
+
+async function loadVRM(path) {
+  loaderMsg.style.display = "flex";
+  loaderMsg.textContent = "Loading " + path + "…";
+  sessionBtn.disabled = true;
+
+  if (vrm) {
+    scene.remove(vrm.scene);
+    VRMUtils.deepDispose(vrm.scene);
+    vrm = null;
+  }
+
+  const loader = new GLTFLoader();
+  loader.register((parser) => new VRMLoaderPlugin(parser));
+
+  try {
+    const gltf = await loader.loadAsync(path);
+    vrm = gltf.userData.vrm;
+    if (!vrm) throw new Error("file loaded but contains no VRM data");
+
+    // Big perf win on static avatars, and avoids frustum-culling popping.
+    VRMUtils.combineSkeletons(gltf.scene);
+    vrm.scene.traverse((o) => { o.frustumCulled = false; });
+
+    // VRM 0.x models face away from the camera by convention.
+    if (vrm.meta?.metaVersion === "0") vrm.scene.rotation.y = Math.PI;
+
+    scene.add(vrm.scene);
+
+    availableExpressions = new Set(
+      (vrm.expressionManager?.expressions ?? []).map((e) => e.expressionName)
+    );
+    exprList.textContent = availableExpressions.size
+      ? "expressions: " + [...availableExpressions].join(", ")
+      : "this model exposes no expressions — face will not emote or lip-sync";
+
+    frameHead();
+
+    loaderMsg.style.display = "none";
+    sessionBtn.disabled = false;
+  } catch (err) {
+    console.error(err);
+    loaderMsg.style.display = "flex";
+    loaderMsg.innerHTML =
+      `Could not load <code>${path}</code>.<br>` +
+      `${err.message}<br><br>` +
+      `Put the .vrm file in the same folder as this page and make sure the ` +
+      `filename matches exactly.`;
+  }
+}
+
+function frameHead() {
+  // Aim the camera using the model's own head bone, so it works regardless of
+  // the character's height or proportions.
+  const head = vrm.humanoid?.getNormalizedBoneNode("head");
+  const target = new THREE.Vector3(0, 1.35, 0);
+  if (head) head.getWorldPosition(target);
+
+  camera.position.set(target.x, target.y + 0.02, target.z + 1.35);
+  camera.lookAt(target.x, target.y + 0.02, target.z);
+}
+
+// ===========================================================================
+// Idle motion — a perfectly still avatar reads as broken, not calm.
+// ===========================================================================
+
+let nextBlinkAt = performance.now() + 2000;
+let blinkStart = null;
+let blinkValue = 0;
+
+function updateBlink(now) {
+  if (blinkStart === null && now >= nextBlinkAt) blinkStart = now;
+  if (blinkStart !== null) {
+    const t = (now - blinkStart) / 140;
+    if (t >= 1) {
+      blinkValue = 0;
+      blinkStart = null;
+      nextBlinkAt = now + 1800 + Math.random() * 3600;
+    } else {
+      blinkValue = t < 0.5 ? t * 2 : (1 - t) * 2;
+    }
+  }
+}
+
+const ease = (cur, tgt, k) => cur + (tgt - cur) * k;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = clock.getDelta();
+  const now = performance.now();
+
+  if (vrm) {
+    updateBlink(now);
+
+    // Mouth: audio amplitude drives 'aa', with a touch of 'ih'/'ou' so the
+    // shape varies instead of a single hinge opening and closing.
+    const mouth = mouthTargetFromPlayback();
+    exprTarget.aa = mouth;
+    exprTarget.ih = mouth * 0.25 * (0.5 + 0.5 * Math.sin(now / 190));
+    exprTarget.ou = mouth * 0.18 * (0.5 + 0.5 * Math.sin(now / 260));
+
+    // Expressions ease slowly; the mouth must keep up with speech, so faster.
+    for (const k of EMOTION_KEYS) {
+      exprCurrent[k] = ease(exprCurrent[k], exprTarget[k], 0.08);
+      if (availableExpressions.has(k)) vrm.expressionManager.setValue(k, exprCurrent[k]);
+    }
+    for (const k of VISEMES) {
+      exprCurrent[k] = ease(exprCurrent[k], exprTarget[k], 0.45);
+      if (availableExpressions.has(k)) vrm.expressionManager.setValue(k, exprCurrent[k]);
+    }
+    if (availableExpressions.has("blink")) {
+      vrm.expressionManager.setValue("blink", blinkValue);
+    }
+
+    // Breathing and a slow head drift.
+    const head = vrm.humanoid?.getNormalizedBoneNode("head");
+    if (head) {
+      head.rotation.x = Math.sin(now / 2600) * 0.035;
+      head.rotation.y = Math.sin(now / 3700) * 0.055;
+      head.rotation.z = Math.sin(now / 4300) * 0.022;
+    }
+    const chest = vrm.humanoid?.getNormalizedBoneNode("chest");
+    if (chest) chest.rotation.x = Math.sin(now / 1600) * 0.018;
+
+    vrm.update(delta);
+  }
+
+  renderer.render(scene, camera);
+}
+
+document.getElementById("loadModelBtn").onclick = () =>
+  loadVRM(document.getElementById("modelPath").value.trim());
+
+
+// ===========================================================================
+// Audio graph — two independent analysers.
+//   micAnalyser      : voice activity detection (is the user speaking?)
+//   playbackAnalyser : lip sync (how open should the mouth be?)
+// Mixing them would make the avatar lip-sync to the user, and make the VAD
+// hear the assistant as user speech.
+// ===========================================================================
+
+let audioCtx = null;
+let micAnalyser = null, micData = null;
+let playbackAnalyser = null, playbackData = null;
+let micStream = null;
+
+function ensureAudioContext() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    playbackAnalyser = audioCtx.createAnalyser();
+    playbackAnalyser.fftSize = 512;
+    playbackAnalyser.smoothingTimeConstant = 0.55;
+    playbackData = new Uint8Array(playbackAnalyser.frequencyBinCount);
+    playbackAnalyser.connect(audioCtx.destination);
+
+    micAnalyser = audioCtx.createAnalyser();
+    micAnalyser.fftSize = 512;
+    micAnalyser.smoothingTimeConstant = 0.3;
+    micData = new Uint8Array(micAnalyser.frequencyBinCount);
+    // deliberately not connected to destination — no monitoring feedback
+  }
+  if (audioCtx.state === "suspended") audioCtx.resume();
+  return audioCtx;
+}
+
+function mouthTargetFromPlayback() {
+  if (!playbackAnalyser || !isPlaying) return 0;
+  playbackAnalyser.getByteFrequencyData(playbackData);
+  let sum = 0;
+  const bins = Math.min(40, playbackData.length);
+  for (let i = 2; i < bins; i++) sum += playbackData[i];
+  return Math.min(1, Math.pow((sum / (bins - 2)) / 128, 1.15));
+}
+
+function micLevel() {
+  if (!micAnalyser) return 0;
+  micAnalyser.getByteFrequencyData(micData);
+  // Vocal range only: with fftSize 512 at 48kHz each bin is ~94Hz, so bins
+  // 1-35 span roughly 90Hz-3.3kHz. Fans, hum and hiss largely fall outside.
+  let sum = 0;
+  const lo = 1, hi = Math.min(35, micData.length);
+  for (let i = lo; i < hi; i++) sum += micData[i];
+  return sum / (hi - lo);
+}
+
+// ===========================================================================
+// Playback queue
+// ===========================================================================
+
+const playQueue = [];
+let isPlaying = false;
+let currentAudio = null;
+
+function enqueueAudio(base64Wav) {
+  const bytes = atob(base64Wav);
+  const arr = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+  const blob = new Blob([arr], { type: "audio/wav" });
+  playQueue.push(URL.createObjectURL(blob));
+  if (!isPlaying) playNext();
+}
+
+function playNext() {
+  if (playQueue.length === 0) {
+    isPlaying = false;
+    currentAudio = null;
+    if (sessionActive && phase === "speaking") setPhase("listening");
+    return;
+  }
+  isPlaying = true;
+  const url = playQueue.shift();
+  const audio = new Audio(url);
+  currentAudio = audio;
+
+  try {
+    const ac = ensureAudioContext();
+    ac.createMediaElementSource(audio).connect(playbackAnalyser);
+  } catch (err) {
+    console.warn("Web Audio routing failed, playing without lip sync:", err);
+  }
+
+  audio.onended = () => { URL.revokeObjectURL(url); playNext(); };
+  audio.onerror = () => { URL.revokeObjectURL(url); playNext(); };
+  audio.play().catch((err) => {
+    console.error("play() failed:", err);
+    isPlaying = false;
+  });
+}
+
+function stopPlayback() {
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.onended = null;
+    currentAudio = null;
+  }
+  while (playQueue.length) URL.revokeObjectURL(playQueue.shift());
+  isPlaying = false;
+}
+
+// ===========================================================================
+// Conversation session
+//   idle ──start──> listening ──speech──> recording ──silence──> processing
+//     ^                 ^                      |                     |
+//     |                 └──────────────────────┴─── speaking <───────┘
+//     └──stop──────────────────────────────────────────┘
+// ===========================================================================
+
+const serverUrlInput = document.getElementById("serverUrl");
+const sessionBtn = document.getElementById("sessionBtn");
+const resetBtn = document.getElementById("resetBtn");
+const stateDot = document.getElementById("stateDot");
+const stateText = document.getElementById("stateText");
+const levelFill = document.getElementById("levelFill");
+const thresholdMark = document.getElementById("thresholdMark");
+const floorReadout = document.getElementById("floorReadout");
+const logEl = document.getElementById("log");
+
+let SPEECH_MARGIN = 10;
+let SILENCE_MS = 800;
+let INTERRUPT_MARGIN = 22;
+const MIN_SPEECH_MS = 250;
+const MAX_UTTERANCE_MS = 15000;
+
+// Adaptive noise floor: a fixed threshold can't tell "someone is talking" from
+// "the room is noisy" — if noise sits above it, the utterance never ends.
+let noiseFloor = 0;
+let noiseCalibrated = false;
+let calibrationSamples = [];
+const CALIBRATION_FRAMES = 45;
+
+const speechThreshold = () => noiseFloor + SPEECH_MARGIN;
+const interruptThreshold = () => noiseFloor + INTERRUPT_MARGIN;
+
+function updateNoiseFloor(level) {
+  if (!noiseCalibrated) {
+    calibrationSamples.push(level);
+    if (calibrationSamples.length >= CALIBRATION_FRAMES) {
+      const sorted = [...calibrationSamples].sort((a, b) => a - b);
+      noiseFloor = sorted[Math.floor(sorted.length / 2)];
+      noiseCalibrated = true;
+    }
+    return;
+  }
+  // Rise slowly, fall faster, so a long utterance can't drag the floor up to
+  // its own level.
+  noiseFloor += (level - noiseFloor) * (level > noiseFloor ? 0.002 : 0.02);
+}
+
+let voiceFrames = 0;
+const VOICE_FRAMES_TO_START = 4;
+
+function bindSlider(id, outId, set, fmt = (v) => v) {
+  const el = document.getElementById(id);
+  const out = document.getElementById(outId);
+  const apply = () => { set(+el.value); out.textContent = fmt(el.value); };
+  el.addEventListener("input", apply);
+  apply();
+}
+bindSlider("thresholdSlider", "thresholdOut", (v) => SPEECH_MARGIN = v);
+bindSlider("silenceSlider", "silenceOut", (v) => SILENCE_MS = v, (v) => v + "ms");
+bindSlider("interruptSlider", "interruptOut", (v) => INTERRUPT_MARGIN = v);
+
+let sessionActive = false;
+let phase = "idle";
+let mediaRecorder = null;
+let chunks = [];
+let speechStartedAt = 0;
+let lastVoiceAt = 0;
+let vadRaf = null;
+
+const PHASE_LABEL = {
+  idle: "idle",
+  listening: "listening — just start talking",
+  recording: "recording…",
+  processing: "thinking…",
+  speaking: "speaking — talk over me to interrupt",
+};
+
+function setPhase(p) {
+  phase = p;
+  stateText.textContent = PHASE_LABEL[p] || p;
+  stateDot.className = "dot" +
+    (p === "recording" ? " rec" : p === "processing" ? " busy" : p === "idle" ? "" : " live");
+}
+
+sessionBtn.onclick = () => sessionActive ? stopSession() : startSession();
+
+async function startSession() {
+  ensureAudioContext();
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        // Without this the assistant's own voice leaks into the mic and the
+        // VAD interrupts itself in a loop.
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+  } catch (err) {
+    stateText.textContent = "microphone unavailable: " + err.message;
+    return;
+  }
+
+  audioCtx.createMediaStreamSource(micStream).connect(micAnalyser);
+
+  noiseCalibrated = false;
+  calibrationSamples = [];
+  voiceFrames = 0;
+
+  sessionActive = true;
+  sessionBtn.textContent = "End conversation";
+  sessionBtn.classList.add("active");
+  setPhase("listening");
+  vadLoop();
+}
+
+function stopSession() {
+  sessionActive = false;
+  if (vadRaf) cancelAnimationFrame(vadRaf);
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.onstop = null;
+    mediaRecorder.stop();
+  }
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  micStream = null;
+  stopPlayback();
+  sessionBtn.textContent = "Start conversation";
+  sessionBtn.classList.remove("active");
+  setPhase("idle");
+  levelFill.style.width = "0%";
+}
+
+function startRecording() {
+  chunks = [];
+  mediaRecorder = new MediaRecorder(micStream);
+  mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+  mediaRecorder.onstop = onUtteranceComplete;
+  mediaRecorder.start();
+  speechStartedAt = performance.now();
+  lastVoiceAt = performance.now();
+  setPhase("recording");
+}
+
+function vadLoop() {
+  if (!sessionActive) return;
+  vadRaf = requestAnimationFrame(vadLoop);
+
+  const level = micLevel();
+  const now = performance.now();
+
+  // Only learn the floor when nobody should be talking, or speech would teach
+  // it that speech is normal.
+  if (phase === "listening" || phase === "processing") updateNoiseFloor(level);
+
+  const scale = Math.max(60, speechThreshold() * 2);
+  levelFill.style.width = Math.min(100, (level / scale) * 100) + "%";
+  thresholdMark.style.left = Math.min(100, (speechThreshold() / scale) * 100) + "%";
+  floorReadout.textContent = noiseCalibrated
+    ? `noise ${noiseFloor.toFixed(0)} · speak >${speechThreshold().toFixed(0)}`
+    : "calibrating…";
+
+  if (!noiseCalibrated) return;
+
+  if (phase === "listening") {
+    if (level > speechThreshold()) {
+      if (++voiceFrames >= VOICE_FRAMES_TO_START) { voiceFrames = 0; startRecording(); }
+    } else voiceFrames = 0;
+
+  } else if (phase === "recording") {
+    if (level > speechThreshold()) lastVoiceAt = now;
+
+    if (now - lastVoiceAt > SILENCE_MS || now - speechStartedAt > MAX_UTTERANCE_MS) {
+      if (lastVoiceAt - speechStartedAt < MIN_SPEECH_MS) {
+        mediaRecorder.onstop = null;   // click or cough — discard
+        mediaRecorder.stop();
+        setPhase("listening");
+      } else {
+        mediaRecorder.stop();
+        setPhase("processing");
+      }
+    }
+
+  } else if (phase === "speaking") {
+    if (level > interruptThreshold()) {
+      if (++voiceFrames >= VOICE_FRAMES_TO_START) {
+        voiceFrames = 0;
+        stopPlayback();
+        markLastBubbleInterrupted();
+        startRecording();
+      }
+    } else voiceFrames = 0;
+  }
+}
+
+async function onUtteranceComplete() {
+  if (!sessionActive) return;
+
+  const blob = new Blob(chunks, { type: "audio/webm" });
+  const base = serverUrlInput.value.replace(/\/$/, "");
+  const form = new FormData();
+  form.append("file", blob, "input.webm");
+
+  const t0 = performance.now();
+  let assistantText = "";
+  let assistantBubble = null;
+
+  try {
+    const resp = await fetch(base + "/chat_stream", { method: "POST", body: form });
+    if (!resp.ok) throw new Error("server returned " + resp.status);
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!sessionActive) return;
+
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const ev = JSON.parse(line);
+
+        if (ev.type === "asr") {
+          if (!ev.text.trim()) { setPhase("listening"); return; }
+          addBubble("user", ev.text);
+        } else if (ev.type === "emotion") {
+          setEmotion(ev.emotion);
+        } else if (ev.type === "audio") {
+          assistantText += ev.text;
+          if (!assistantBubble) {
+            assistantBubble = addBubble("assistant", assistantText);
+          } else {
+            assistantBubble.querySelector(".text").textContent = assistantText;
+          }
+          if (phase !== "recording") setPhase("speaking");
+          enqueueAudio(ev.wav);
+        } else if (ev.type === "done") {
+          const rt = ((performance.now() - t0) / 1000).toFixed(2);
+          if (assistantBubble) {
+            const m = document.createElement("div");
+            m.className = "metrics";
+            m.textContent = `first audio ${ev.first_audio}s · total ${ev.total}s · round trip ${rt}s`;
+            assistantBubble.appendChild(m);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error(err);
+    stateText.textContent = "request failed: " + err.message;
+  }
+
+  if (sessionActive && !isPlaying && phase !== "recording") setPhase("listening");
+}
+
+function addBubble(role, text) {
+  const div = document.createElement("div");
+  div.className = "bubble " + role;
+  const who = document.createElement("div");
+  who.className = "who";
+  who.textContent = role === "user" ? "You" : "Assistant";
+  const t = document.createElement("div");
+  t.className = "text";
+  t.textContent = text;
+  div.appendChild(who);
+  div.appendChild(t);
+  logEl.appendChild(div);
+  div.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  return div;
+}
+
+function markLastBubbleInterrupted() {
+  const bubbles = logEl.querySelectorAll(".bubble.assistant");
+  const last = bubbles[bubbles.length - 1];
+  if (!last || last.querySelector(".interrupted")) return;
+  const tag = document.createElement("div");
+  tag.className = "metrics interrupted";
+  tag.textContent = "interrupted";
+  last.appendChild(tag);
+}
+
+resetBtn.onclick = async () => {
+  const base = serverUrlInput.value.replace(/\/$/, "");
+  try {
+    await fetch(base + "/reset", { method: "POST" });
+    logEl.innerHTML = "";
+    setEmotion("neutral");
+  } catch (err) {
+    stateText.textContent = "reset failed: " + err.message;
+  }
+};
+
+// ===========================================================================
+// Startup — everything that actually runs is kicked off here, after every
+// declaration above exists. Calling these earlier in the module would hit the
+// temporal dead zone on the const/let bindings they touch.
+// ===========================================================================
+
+setEmotion("neutral");
+setPhase("idle");
+animate();
+loadVRM(document.getElementById("modelPath").value.trim());
+</script>
+</body>
+</html>

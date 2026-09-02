@@ -36,11 +36,23 @@ Measured on a single NVIDIA A800-40GB, warm.
 
 ### English stack
 
+Component throughput:
+
 | Stage | RTF | Notes |
 |---|---|---|
 | ASR (faster-whisper small) | **0.041** | ~24× faster than real time |
 | TTS (Kokoro 82M) | **0.022** | ~45× faster than real time; 2.3s of speech synthesized in 50ms |
 | **Bottleneck** | — | **the LLM**, not TTS |
+
+End-to-end, measured live over three consecutive exchanges:
+
+| Turn | ASR | Time to first audio | Full reply |
+|---|---|---|---|
+| "Hello, I'm home." | 0.54s | 0.57s | 0.76s |
+| "Can you hear me?" | 0.37s | 0.40s | 0.59s |
+| "How are you doing?" | 0.37s | 0.38s | 0.55s |
+
+**Total round trip ≈ 1 second**, with speech beginning under 0.6s after the request — close to the 200–500ms pause length of natural human conversation. The Chinese stack on the same hardware took roughly 60 seconds for the equivalent English exchange.
 
 ### Chinese stack
 
@@ -124,10 +136,21 @@ Browsers only grant microphone access on `localhost` or HTTPS — opening the fi
 Streaming event format:
 
 ```json
-{"type": "asr",   "text": "..."}
-{"type": "audio", "text": "...", "wav": "<base64 wav>"}
-{"type": "done",  "text": "...", "first_audio": 1.83, "total": 4.12, "segments": 2}
+{"type": "asr",     "text": "..."}
+{"type": "emotion", "emotion": "happy"}
+{"type": "audio",   "text": "...", "wav": "<base64 wav>", "phonemes": "..."}
+{"type": "done",    "text": "...", "emotion": "happy", "first_audio": 0.4, "total": 0.6, "segments": 2}
 ```
+
+## Avatar Driving (English stack)
+
+The server emits two extra signals so a rendered avatar can lip-sync and emote:
+
+**Emotion.** The LLM is instructed to prefix each reply with a tag — `[happy] That's great to hear!` — chosen from `neutral`, `happy`, `sad`, `surprised`, `thinking`, `excited`. The server strips the tag before synthesis (so it is never spoken), stores the untagged text in history, and sends the emotion as its own event *before* the first audio chunk, letting the avatar react before it starts speaking. Unrecognized or missing tags fall back to `neutral`.
+
+**Phonemes.** Kokoro's pipeline yields `(graphemes, phonemes, audio)`; the phoneme string is passed through to the client, giving accurate mouth shapes rather than the cruder approach of deriving mouth opening from audio amplitude.
+
+On `/chat` these arrive as the `X-Emotion` and `X-Phonemes` response headers; on `/chat_stream` as the `emotion` event and the `phonemes` field of each `audio` event.
 
 ## Design Notes
 

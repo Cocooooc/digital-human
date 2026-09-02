@@ -27,6 +27,7 @@ Run with:
 import base64
 import io
 import json
+import re
 import subprocess
 import tempfile
 import time
@@ -67,11 +68,22 @@ MAX_NEW_TOKENS = 80  # TTS is cheap now, so replies can be a bit longer
 CUT_MARKS = ".!?;\n"
 MIN_CHARS = 10
 
+# Emotion tags the avatar knows how to render. The LLM is asked to prefix each
+# reply with one of these; the tag is stripped before synthesis and sent to the
+# client separately so it can drive facial blendshapes.
+EMOTIONS = ["neutral", "happy", "sad", "surprised", "thinking", "excited"]
+DEFAULT_EMOTION = "neutral"
+
 SYSTEM_PROMPT = (
     "You are a friendly voice assistant in a live spoken conversation. "
     "Reply in English. Keep replies short and natural — the way a person "
     "actually talks out loud. No lists, no markdown, no written-style "
-    "structure. Two or three sentences at most."
+    "structure. Two or three sentences at most.\n\n"
+    "Begin every reply with an emotion tag in square brackets, chosen from: "
+    + ", ".join(EMOTIONS) + ". "
+    "Example: [happy] That's great to hear! "
+    "The tag is not spoken aloud — it only tells the avatar which expression "
+    "to show. Use it to match the tone of what you're saying."
 )
 
 # ---------------------------------------------------------------------------
@@ -187,16 +199,44 @@ def build_messages(user_text: str):
     )
 
 
-def synthesize(text: str) -> tuple[np.ndarray, int]:
+EMOTION_TAG_RE = re.compile(r"^\s*\[(\w+)\]\s*")
+
+
+def parse_emotion(reply: str) -> tuple[str, str]:
+    """Split a leading '[emotion] text' tag off the LLM's reply.
+
+    Returns (emotion, text_without_tag). Falls back to DEFAULT_EMOTION if the
+    model omitted the tag or used one the avatar doesn't know."""
+    match = EMOTION_TAG_RE.match(reply)
+    if not match:
+        return DEFAULT_EMOTION, reply.strip()
+
+    tag = match.group(1).lower()
+    text = reply[match.end():].strip()
+    return (tag if tag in EMOTIONS else DEFAULT_EMOTION), text
+
+
+def synthesize(text: str) -> tuple[np.ndarray, int, str]:
     """Kokoro yields (graphemes, phonemes, audio) tuples. At RTF ~0.02 the
-    whole utterance is effectively instant, so just collect and concatenate."""
-    chunks = [chunk for _, _, chunk in tts_pipeline(text, voice=TTS_VOICE)]
+    whole utterance is effectively instant, so just collect and concatenate.
+
+    The phoneme string is kept and returned — it's what drives accurate mouth
+    shapes on the avatar (far better than deriving mouth open/close from raw
+    audio amplitude)."""
+    chunks = []
+    phoneme_parts = []
+    for _, phonemes, chunk in tts_pipeline(text, voice=TTS_VOICE):
+        chunks.append(chunk)
+        if phonemes:
+            phoneme_parts.append(phonemes)
+
     if not chunks:
-        return np.zeros(0, dtype=np.float32), TTS_SAMPLE_RATE
+        return np.zeros(0, dtype=np.float32), TTS_SAMPLE_RATE, ""
+
     audio = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
     if hasattr(audio, "numpy"):  # torch tensor -> numpy
         audio = audio.numpy()
-    return audio, TTS_SAMPLE_RATE
+    return audio, TTS_SAMPLE_RATE, " ".join(phoneme_parts)
 
 
 def audio_to_wav_bytes(audio: np.ndarray, sr: int) -> bytes:
@@ -220,24 +260,31 @@ async def chat(file: UploadFile = File(...)):
 
     t0 = time.time()
     messages = build_messages(user_text)
+    # return_dict=True gives us attention_mask alongside input_ids. Without it
+    # transformers warns that the mask can't be inferred (pad token == eos
+    # token) and generation can behave unpredictably.
     inputs = llm_tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
         enable_thinking=False,  # must be explicit or latency spikes
         return_tensors="pt",
+        return_dict=True,
     ).to("cuda:0")
 
-    output_ids = llm_model.generate(inputs, max_new_tokens=MAX_NEW_TOKENS)
-    reply = llm_tokenizer.decode(
-        output_ids[0][inputs.shape[-1]:], skip_special_tokens=True
+    output_ids = llm_model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS)
+    raw_reply = llm_tokenizer.decode(
+        output_ids[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True
     ).strip()
-    print(f"[LLM] {time.time()-t0:.2f}s -> {reply!r}")
+    emotion, reply = parse_emotion(raw_reply)
+    print(f"[LLM] {time.time()-t0:.2f}s -> [{emotion}] {reply!r}")
 
+    # Store the untagged text in history — the tag is presentation metadata,
+    # not part of the conversation.
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": reply})
 
     t0 = time.time()
-    audio, sr = synthesize(reply)
+    audio, sr, phonemes = synthesize(reply)
     print(f"[TTS] {time.time()-t0:.2f}s")
     print(f"[TOTAL] {time.time()-t_request:.2f}s")
 
@@ -251,6 +298,9 @@ async def chat(file: UploadFile = File(...)):
             # with decodeURIComponent() on the client.
             "X-User-Text": quote(user_text),
             "X-Reply-Text": quote(reply),
+            # Avatar driving data
+            "X-Emotion": emotion,
+            "X-Phonemes": quote(phonemes),
         },
     )
 
@@ -279,6 +329,7 @@ async def chat_stream(file: UploadFile = File(...)):
             add_generation_prompt=True,
             enable_thinking=False,
             return_tensors="pt",
+            return_dict=True,
         ).to("cuda:0")
 
         streamer = TextIteratorStreamer(
@@ -287,7 +338,7 @@ async def chat_stream(file: UploadFile = File(...)):
         gen_thread = Thread(
             target=llm_model.generate,
             kwargs=dict(
-                input_ids=inputs,
+                **inputs,
                 max_new_tokens=MAX_NEW_TOKENS,
                 streamer=streamer,
             ),
@@ -300,45 +351,73 @@ async def chat_stream(file: UploadFile = File(...)):
         buf = ""
         first_audio_time = None
         n_segments = 0
+        emotion = None  # resolved from the tag at the start of the reply
 
         for piece in streamer:
             full_reply += piece
             buf += piece
 
+            # The emotion tag arrives first, before any spoken text. Strip it
+            # out of the buffer as soon as it's complete so it never reaches
+            # TTS, and emit it as its own event so the avatar can react before
+            # the first audio arrives.
+            if emotion is None and "]" in buf:
+                emotion, buf = parse_emotion(buf)
+                yield json.dumps({"type": "emotion", "emotion": emotion}) + "\n"
+
             if len(buf.strip()) >= MIN_CHARS and buf.rstrip()[-1:] in CUT_MARKS:
-                audio, sr = synthesize(buf)
+                audio, sr, phonemes = synthesize(buf)
                 if first_audio_time is None:
                     first_audio_time = time.time() - t_start
                 n_segments += 1
                 wav_b64 = base64.b64encode(audio_to_wav_bytes(audio, sr)).decode()
                 yield json.dumps(
-                    {"type": "audio", "text": buf, "wav": wav_b64}, ensure_ascii=False
+                    {
+                        "type": "audio",
+                        "text": buf,
+                        "wav": wav_b64,
+                        "phonemes": phonemes,
+                    },
+                    ensure_ascii=False,
                 ) + "\n"
                 buf = ""
 
         # flush any trailing text that didn't end on punctuation
         if buf.strip():
-            audio, sr = synthesize(buf)
+            audio, sr, phonemes = synthesize(buf)
             if first_audio_time is None:
                 first_audio_time = time.time() - t_start
             n_segments += 1
             wav_b64 = base64.b64encode(audio_to_wav_bytes(audio, sr)).decode()
             yield json.dumps(
-                {"type": "audio", "text": buf, "wav": wav_b64}, ensure_ascii=False
+                {
+                    "type": "audio",
+                    "text": buf,
+                    "wav": wav_b64,
+                    "phonemes": phonemes,
+                },
+                ensure_ascii=False,
             ) + "\n"
 
         gen_thread.join()
 
+        # Store the reply without its emotion tag.
+        _, clean_reply = parse_emotion(full_reply)
+        # Raw output includes the tag — useful for checking whether the model
+        # is actually following the emotion-tagging instruction.
+        print(f"[LLM raw] {full_reply!r}")
         history.append({"role": "user", "content": user_text})
-        history.append({"role": "assistant", "content": full_reply})
+        history.append({"role": "assistant", "content": clean_reply})
 
-        print(f"[STREAM] first_audio={first_audio_time:.2f}s "
-              f"total={time.time()-t_start:.2f}s segments={n_segments}")
+        print(f"[STREAM] first_audio={(first_audio_time or 0):.2f}s "
+              f"total={time.time()-t_start:.2f}s segments={n_segments} "
+              f"emotion={emotion or DEFAULT_EMOTION}")
 
         yield json.dumps(
             {
                 "type": "done",
-                "text": full_reply,
+                "text": clean_reply,
+                "emotion": emotion or DEFAULT_EMOTION,
                 "first_audio": round(first_audio_time or 0, 2),
                 "total": round(time.time() - t_start, 2),
                 "segments": n_segments,
