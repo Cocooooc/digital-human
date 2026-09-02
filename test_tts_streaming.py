@@ -39,7 +39,7 @@ def inspect_api():
     print([x for x in dir(qwen_tts) if not x.startswith("_")])
     print("=" * 60)
 
-    candidates = ["Qwen3TTS", "QwenTTS", "TTSModel", "Model"]
+    candidates = ["Qwen3TTSModel", "Qwen3TTS", "QwenTTS", "TTSModel", "Model"]
     tts_cls = None
     for name in candidates:
         if hasattr(qwen_tts, name):
@@ -52,10 +52,21 @@ def inspect_api():
         print("   python -c 'import qwen_tts; help(qwen_tts)'")
         return None
 
-    if hasattr(tts_cls, "generate_voice_clone"):
-        sig = inspect.signature(tts_cls.generate_voice_clone)
-        print(f"\ngenerate_voice_clone signature: {sig}")
-        print(f"\ndocstring:\n{tts_cls.generate_voice_clone.__doc__}")
+    print(f"\nMethods/attrs on {tts_cls.__name__}:")
+    print([x for x in dir(tts_cls) if not x.startswith("_")])
+
+    for method_name in ["from_pretrained", "create_voice_clone_prompt", "generate_voice_clone"]:
+        if hasattr(tts_cls, method_name):
+            method = getattr(tts_cls, method_name)
+            try:
+                sig = inspect.signature(method)
+                print(f"\n{method_name} signature: {sig}")
+            except (ValueError, TypeError):
+                print(f"\n{method_name}: (signature unavailable, likely a C/pybind method)")
+            if method.__doc__:
+                print(f"docstring:\n{method.__doc__}")
+        else:
+            print(f"\n⚠️ {method_name} NOT FOUND on {tts_cls.__name__}")
 
     return tts_cls
 
@@ -112,20 +123,40 @@ if __name__ == "__main__":
         print("\nPlease share the help() output above so the script can be adjusted.")
         exit(1)
 
-    print("\nLoading model...")
-    t0 = time.time()
-    tts = tts_cls.from_pretrained(MODEL_PATH, device="cuda:0")
-    print(f"Load time: {time.time()-t0:.2f}s")
+    try:
+        print("\nLoading model...")
+        t0 = time.time()
+        # from_pretrained() loads onto CPU by default (no `device` kwarg).
+        # The real nn.Module is at `.model`; `.device` is a plain writable
+        # attribute that other methods read to decide where to build
+        # tensors, so both need to be set or you get a device-mismatch
+        # crash inside generate_voice_clone.
+        tts = tts_cls.from_pretrained(MODEL_PATH)
+        tts.model = tts.model.to("cuda:0")
+        tts.device = "cuda:0"
+        print(f"Load time: {time.time()-t0:.2f}s, device: {tts.device}")
+    except Exception as e:
+        print(f"\n❌ from_pretrained failed: {e}")
+        print("The signature printed above should show the real expected args.")
+        exit(1)
 
-    print("\nPrecomputing voice clone prompt...")
-    prompt = tts.create_voice_clone_prompt(REF_AUDIO, ref_text=REF_TEXT)
+    try:
+        print("\nPrecomputing voice clone prompt...")
+        prompt = tts.create_voice_clone_prompt(REF_AUDIO, ref_text=REF_TEXT)
+    except Exception as e:
+        print(f"\n❌ create_voice_clone_prompt failed: {e}")
+        exit(1)
 
-    print("\nWarming up...")
-    _ = tts.generate_voice_clone(
-        text="你好",
-        voice_clone_prompt=prompt,
-        non_streaming_mode=False,
-    )
+    try:
+        print("\nWarming up...")
+        _ = tts.generate_voice_clone(
+            text="你好",
+            voice_clone_prompt=prompt,
+            non_streaming_mode=False,
+        )
+    except Exception as e:
+        print(f"\n❌ generate_voice_clone failed: {e}")
+        exit(1)
 
     results = []
     for i in range(3):

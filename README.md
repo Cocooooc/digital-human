@@ -1,6 +1,8 @@
 # Digital Human — Real-Time Voice Conversation System
 
-A locally-deployed conversational AI pipeline that listens, thinks, and speaks: **ASR → LLM → TTS**, fully connected over HTTP, running entirely on a self-hosted GPU server (no external API calls at runtime).
+A locally-deployed conversational AI pipeline that listens, thinks, and speaks: **ASR → LLM → TTS**, connected over HTTP, running entirely on a self-hosted GPU server (no external API calls at runtime).
+
+Two stacks are included — an English one (`server_english.py`) and a Chinese one (`server_stream.py`) — because the right model choice turned out to depend almost entirely on the target language.
 
 ## Overview
 
@@ -10,45 +12,56 @@ A locally-deployed conversational AI pipeline that listens, thinks, and speaks: 
 
    Chrome Web App
     ├ 🎤 Microphone recording               uvicorn (FastAPI)
-    ├ Upload audio     ── HTTP ──→           ├ FunASR        (listen)
-    └ 🔊 Playback       ←──────────          ├ Qwen3-4B      (think)
-                                             ├ Qwen3-TTS     (speak)
+    ├ Upload audio     ── HTTP ──→           ├ ASR      (listen)
+    └ 🔊 Playback       ←──────────          ├ LLM      (think)
+                                             ├ TTS      (speak)
                                              └ conversation history
 ```
 
 The client only handles recording and playback; all inference runs on the server.
 
-## Features
-
-- **End-to-end voice pipeline**: speech in, speech out, single HTTP round trip
-- **Multi-turn memory**: conversation history is fed back into the LLM context each turn
-- **Streaming output**: sentence-level pipelining — the first audio segment plays while the LLM is still generating the rest of the reply, cutting time-to-first-audio from ~12s to ~2s
-- **Voice cloning**: TTS output is cloned from a short reference audio sample
-- **Fully self-hosted**: no dependency on external APIs after model download; data never leaves the server
-
 ## Tech Stack
 
-| Component | Model | Notes |
+| Component | English stack (`server_english.py`) | Chinese stack (`server_stream.py`) |
 |---|---|---|
-| ASR | FunASR (paraformer-zh + fsmn-vad + ct-punc) | RTF ≈ 0.015 |
-| LLM | Qwen3-4B | Thinking mode disabled for low latency |
-| TTS | Qwen3-TTS-12Hz-0.6B-Base | Voice cloning via reference audio |
-| Server | FastAPI + uvicorn | Non-streaming (`/chat`) and streaming (`/chat_stream`) endpoints |
-| Client | Vanilla JS web page | Browser microphone capture, queued audio playback |
+| ASR | faster-whisper `small` | FunASR (paraformer-zh + fsmn-vad + ct-punc) |
+| LLM | Qwen3-4B | Qwen3-4B |
+| TTS | Kokoro 82M | Qwen3-TTS-12Hz-0.6B-Base (voice cloning) |
+| Server | FastAPI + uvicorn | FastAPI + uvicorn |
+| Client | Vanilla JS web page | same |
 
 ## Performance
 
-Measured end-to-end latency (warm, single GPU — NVIDIA A800 40GB):
+Measured on a single NVIDIA A800-40GB, warm.
+
+### English stack
+
+| Stage | RTF | Notes |
+|---|---|---|
+| ASR (faster-whisper small) | **0.041** | ~24× faster than real time |
+| TTS (Kokoro 82M) | **0.022** | ~45× faster than real time; 2.3s of speech synthesized in 50ms |
+| **Bottleneck** | — | **the LLM**, not TTS |
+
+### Chinese stack
 
 | Stage | Latency | Share |
 |---|---|---|
 | ASR | 0.21s | 2% |
 | LLM | 0.70s | 6% |
-| TTS | ~11s | 85% (bottleneck) |
-| **Total (non-streaming)** | **~12s** | |
-| **First audio (streaming pipeline)** | **~2s** | |
+| TTS | ~11–19s | ~85% (bottleneck) |
 
-TTS is the dominant cost. The model's real-time factor (RTF ≈ 1.5) was found to be an inherent property of its autoregressive generation — four separate optimization attempts (precomputed voice-clone prompts, x-vector-only mode, non-streaming mode, flash-attention) produced no measurable improvement. Sentence-level streaming was implemented instead, so the user hears the first sentence while later sentences are still being synthesized.
+### Why the English stack is ~100× faster at synthesis
+
+Qwen3-TTS measured **RTF ≈ 3.9 plus a ~6 second fixed overhead per call** in this environment (versus RTF ≈ 1.5 recorded in earlier runs on a different instance — the gap was never fully explained, but library versions had changed). Kokoro measured **RTF ≈ 0.022 with no meaningful fixed cost**, roughly a 177× improvement in synthesis throughput. End-to-end latency for an English exchange went from ~60s to a few seconds.
+
+The lesson isn't that Kokoro beats Qwen3-TTS in general — it's that running a Chinese-optimized voice-cloning model on English text was an architectural mismatch, and no amount of parameter tuning fixed it. Four separate optimization attempts on the Chinese TTS path (precomputed voice-clone prompts, x-vector-only mode, non-streaming mode, bfloat16) produced no meaningful change; switching to a model built for the target language changed everything.
+
+## Features
+
+- **End-to-end voice pipeline**: speech in, speech out, one HTTP round trip
+- **Multi-turn memory**: recent conversation turns are re-sent as LLM context each request
+- **Streaming output**: sentence-level pipelining, so playback starts before the full reply is generated
+- **Fully self-hosted**: no external API dependency at runtime; data never leaves the server
 
 ## Getting Started
 
@@ -56,62 +69,55 @@ TTS is the dominant cost. The model's real-time factor (RTF ≈ 1.5) was found t
 - Linux server with an NVIDIA GPU (tested on A800-40GB, CUDA 12.4)
 - Python 3.10+
 
-### Setup
+### English stack
 
 ```bash
-git clone https://github.com/<your-username>/digital-human.git
+git clone https://github.com/Cocooooc/digital-human.git
 cd digital-human
-bash setup.sh
+bash setup.sh          # installs deps, downloads Qwen3-4B
+bash setup_english.sh  # installs faster-whisper + Kokoro + espeak-ng
+python test_english_stack.py   # verify APIs and measure RTF
+python -m uvicorn server_english:app --host 0.0.0.0 --port <your-port>
 ```
 
-`setup.sh` installs dependencies and downloads the LLM/TTS models via ModelScope.
-
-Then get a reference audio clip for voice cloning (not tracked in git, since
-it's a binary asset — but here's how to regenerate the one currently used by
-`REF_TEXT` in `server_stream.py` if it's ever lost):
+### Chinese stack
 
 ```bash
-# Download the FunASR official sample clip and normalize it to 16kHz mono
+bash setup.sh   # also downloads Qwen3-TTS
+
+# Reference audio for voice cloning (not tracked in git)
 wget https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/asr_example_zh.wav -O /root/test10s.wav
 ffmpeg -y -i /root/test10s.wav -ar 16000 -ac 1 -c:a pcm_s16le /root/test10s_16k.wav
 mv /root/test10s_16k.wav /root/test10s.wav
+
+python -m uvicorn server_stream:app --host 0.0.0.0 --port <your-port>
 ```
 
-`REF_TEXT` must match this clip word-for-word — it was transcribed with our
-own ASR model. To reproduce it or verify it after swapping the clip:
+`REF_TEXT` in `server_stream.py` must match the reference clip word-for-word. To regenerate it after swapping the clip:
 
 ```bash
 python -c "
 from funasr import AutoModel
 model = AutoModel(model='paraformer-zh', vad_model='fsmn-vad', punc_model='ct-punc', device='cuda:0')
-res = model.generate(input='/root/test10s.wav')
-print(res[0]['text'])
+print(model.generate(input='/root/test10s.wav')[0]['text'])
 "
 ```
 
-To use your own voice instead, record ~10s of clear speech, run it through
-the same transcription step, and update `REF_TEXT` in `server_stream.py`
-(and `test_tts_streaming.py`) to match.
-
-Start the server:
-
-```bash
-python -m uvicorn server_stream:app --host 0.0.0.0 --port 15333
-```
-
-Open the client from `localhost` (browsers only grant microphone access on localhost or HTTPS):
+### Client
 
 ```bash
 python -m http.server 8000
-# then open http://localhost:8000/digital_human_stream.html
+# open http://localhost:8000/digital_human_stream.html
 ```
+
+Browsers only grant microphone access on `localhost` or HTTPS — opening the file directly via `file://` will not work. Set the server URL in the page's input box to match your server's address and port.
 
 ## API
 
 | Endpoint | Description |
 |---|---|
-| `GET /` | Health check, returns current conversation turn count |
-| `POST /chat` | Non-streaming — upload audio, receive a complete WAV response |
+| `GET /` | Health check; returns turn count and which models are loaded |
+| `POST /chat` | Non-streaming — upload audio, receive a complete WAV |
 | `POST /chat_stream` | Streaming — NDJSON, one event per line |
 | `POST /reset` | Clear conversation memory |
 
@@ -125,7 +131,7 @@ Streaming event format:
 
 ## Design Notes
 
-**Conversation memory**: the LLM itself is stateless. "Memory" is implemented by prepending recent turns to every request:
+**Conversation memory.** The LLM is stateless. "Memory" means prepending recent turns to every request:
 
 ```python
 from collections import deque
@@ -136,21 +142,26 @@ messages = ([{"role": "system", "content": SYSTEM}]
             + [{"role": "user", "content": user_text}])
 ```
 
-**Sentence-level streaming pipeline**: as the LLM streams tokens, text is buffered until a sentence-ending punctuation mark is hit, then immediately sent to TTS and pushed to the client — while the LLM continues generating the next sentence. This overlaps the two slowest stages instead of running them sequentially.
+Longer history means more input tokens and slower generation. This is a single global history — concurrent users would need per-session keying.
 
-**Why Qwen3-4B over larger models**: for real-time conversation, latency matters more than raw capability. Models above ~14B were too slow for interactive use; 4B was chosen as the best latency/quality tradeoff within the Qwen3 family.
+**Sentence-level streaming.** As the LLM streams tokens, text is buffered until a sentence boundary, then sent straight to TTS and pushed to the client while generation continues. In the Chinese stack this existed to hide slow synthesis; in the English stack synthesis is essentially free, so it exists to start speaking before the LLM finishes.
 
-**Why local deployment**: no per-request API cost, data stays on the server, and the base TTS model supports fine-tuning (not possible with hosted APIs).
+**Non-ASCII in HTTP headers.** `/chat` returns the transcript and reply as response headers, but HTTP headers are latin-1 only — putting Chinese text in one raises `UnicodeEncodeError` and the request fails with a 500 that the browser misreports as a CORS error. The fix is percent-encoding server-side (`urllib.parse.quote`) and `decodeURIComponent()` client-side.
+
+**Measure RTF, not wall-clock time.** TTS output length varies run to run due to sampling randomness, so raw elapsed time is misleading — a "faster" run is often just a shorter utterance. Real-time factor (elapsed ÷ audio duration) is the only comparable metric.
+
+**Loading Qwen3-TTS.** `Qwen3TTSModel.from_pretrained()` takes no `device` argument and loads on CPU. The underlying module is at `.model` and has a normal `.to()`, but the wrapper's `.device` attribute is a plain writable field that other methods read when building tensors — both must be set, or generation crashes with a device mismatch.
 
 ## Project Status
 
 - [x] ASR / LLM / TTS individually validated
 - [x] Three modules pipelined
-- [x] Non-streaming HTTP service
+- [x] HTTP service (streaming + non-streaming)
 - [x] Multi-turn conversation memory
 - [x] Web client (microphone input, auto playback)
-- [x] Streaming output (sentence-level pipeline)
+- [x] English stack with ~100× faster synthesis
 - [ ] Streaming input (WebSocket + streaming ASR)
+- [ ] Per-session history for concurrent users
 - [ ] Fine-tuning
 
 ## License

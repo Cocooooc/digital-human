@@ -52,7 +52,7 @@
 <div class="sub">ASR (FunASR) &rarr; LLM (Qwen3-4B) &rarr; TTS (Qwen3-TTS voice clone)</div>
 
 <div class="row">
-  <input type="text" id="serverUrl" value="http://localhost:15333" />
+  <input type="text" id="serverUrl" value="http://180.127.11.177:15343" />
 </div>
 
 <div class="row">
@@ -102,7 +102,14 @@ function playNext() {
     URL.revokeObjectURL(url);
     playNext();
   };
-  audio.play();
+  audio.onerror = (e) => {
+    console.error("Audio playback error:", audio.error);
+    statusEl.textContent = "Audio playback error — check console (F12).";
+  };
+  audio.play().catch((err) => {
+    console.error("play() failed:", err);
+    statusEl.textContent = "Playback blocked: " + err.message + " — try clicking the page first.";
+  });
 }
 
 // --- recording -----------------------------------------------------------
@@ -154,8 +161,10 @@ async function handleRecordingStop() {
 async function sendNonStreaming(base, form) {
   const t0 = performance.now();
   const resp = await fetch(base + "/chat", { method: "POST", body: form });
-  const userText = resp.headers.get("X-User-Text") || "";
-  const replyText = resp.headers.get("X-Reply-Text") || "";
+  // Server percent-encodes these headers (HTTP headers can't carry non-ASCII
+  // text directly), so decode them back here.
+  const userText = decodeURIComponent(resp.headers.get("X-User-Text") || "");
+  const replyText = decodeURIComponent(resp.headers.get("X-Reply-Text") || "");
   const wavBlob = await resp.blob();
   const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
 

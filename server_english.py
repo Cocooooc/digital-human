@@ -1,25 +1,27 @@
 """
-Digital Human — voice conversation server.
+Digital Human — English voice conversation server.
 
-Pipeline: ASR (FunASR) -> LLM (Qwen3-4B) -> TTS (Qwen3-TTS voice clone)
+Pipeline: ASR (faster-whisper) -> LLM (Qwen3-4B) -> TTS (Kokoro)
 
-Two HTTP endpoints:
-  POST /chat         non-streaming: upload audio, get back one complete WAV file
-  POST /chat_stream   streaming: NDJSON, one JSON event per line, sentence-level
-                      pipeline (TTS starts on sentence 1 while the LLM is still
-                      generating sentence 2, so the first audio arrives fast)
-  POST /reset          clear the conversation history
-  GET  /               health check
+Replaces the Chinese-optimized stack (FunASR + Qwen3-TTS) with English-first
+models. Measured on an A800:
+
+    faster-whisper small : RTF 0.041  (24x faster than real time)
+    Kokoro 82M           : RTF 0.022  (45x faster than real time)
+    vs Qwen3-TTS         : RTF 3.9 plus ~6s fixed overhead
+
+TTS is no longer the bottleneck — the LLM is. That inverts the design from the
+Chinese version: sentence-level streaming exists to overlap LLM generation with
+synthesis, not to hide slow synthesis.
+
+Endpoints:
+  GET  /              health check
+  POST /chat          non-streaming: upload audio, get one complete WAV back
+  POST /chat_stream   streaming: NDJSON, one event per line
+  POST /reset         clear conversation history
 
 Run with:
-  python -m uvicorn server_stream:app --host 0.0.0.0 --port 15333
-
-NOTE: this is a reconstruction from the project's design notes (the working
-copy that lived only on the previous server instance was lost when that
-instance was torn down). Re-verify against the actual funasr / qwen_tts
-library signatures on the server — some call parameters may need small
-adjustments (see the README "Design Notes" section and the project doc for
-the exact API signatures that were confirmed to work).
+  python -m uvicorn server_english:app --host 0.0.0.0 --port 15343
 """
 
 import base64
@@ -29,7 +31,6 @@ import subprocess
 import tempfile
 import time
 from collections import deque
-from pathlib import Path
 from threading import Thread
 from urllib.parse import quote
 
@@ -45,47 +46,42 @@ from fastapi.responses import Response, StreamingResponse
 # ---------------------------------------------------------------------------
 
 LLM_PATH = "/root/qwen3-4b"
-TTS_PATH = "/root/qwen3-tts"
-REF_AUDIO = "/root/test10s.wav"
-# Must match, word for word, what is actually said in REF_AUDIO.
-# Source: FunASR official sample audio
-# (https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/asr_example_zh.wav),
-# transcribed with our own ASR model — see README for how to regenerate this
-# if the reference audio changes.
-REF_TEXT = "欢迎大家来体验达摩院推出的语音识别模型。"
+
+# faster-whisper size: tiny / base / small / medium / large-v3.
+# "small" is the latency/accuracy sweet spot for conversation.
+ASR_MODEL_SIZE = "small"
+ASR_LANGUAGE = "en"
+
+# Kokoro voice. American female: af_bella, af_nicole, af_sarah, af_sky
+#               American male:   am_adam, am_michael
+#               British:         bf_emma, bf_isabella, bm_george, bm_lewis
+TTS_VOICE = "af_bella"
+TTS_LANG_CODE = "a"  # 'a' = American English, 'b' = British English
+TTS_SAMPLE_RATE = 24000
 
 ASR_SAMPLE_RATE = 16000
-HISTORY_TURNS = 6  # keep the last N user/assistant turn pairs
-MAX_NEW_TOKENS = 60
+HISTORY_TURNS = 6
+MAX_NEW_TOKENS = 80  # TTS is cheap now, so replies can be a bit longer
 
-# Sentence-level streaming pipeline: cut the LLM's streamed output into
-# chunks at these punctuation marks, and only once the buffered chunk has at
-# least MIN_CHARS characters (too short = choppy audio, too long = slower
-# first-audio latency).
-CUT_MARKS = "。！？；，、\n"
-MIN_CHARS = 5
+# Sentence boundaries for the streaming pipeline (English punctuation).
+CUT_MARKS = ".!?;\n"
+MIN_CHARS = 10
 
 SYSTEM_PROMPT = (
-    "You are a friendly voice assistant having a live spoken conversation. "
-    "Keep replies short, natural, and conversational, the way a person would "
-    "actually talk out loud — no lists, no markdown, no written-style "
-    "structure. Respond in the same language the user is speaking, which "
-    "will normally be Chinese."
+    "You are a friendly voice assistant in a live spoken conversation. "
+    "Reply in English. Keep replies short and natural — the way a person "
+    "actually talks out loud. No lists, no markdown, no written-style "
+    "structure. Two or three sentences at most."
 )
 
 # ---------------------------------------------------------------------------
-# Model loading (once, at process startup — all three models stay resident)
+# Model loading (once at startup; all three stay resident)
 # ---------------------------------------------------------------------------
 
-print("Loading ASR (FunASR)...")
-from funasr import AutoModel
+print("Loading ASR (faster-whisper)...")
+from faster_whisper import WhisperModel
 
-asr_model = AutoModel(
-    model="paraformer-zh",
-    vad_model="fsmn-vad",
-    punc_model="ct-punc",
-    device="cuda:0",
-)
+asr_model = WhisperModel(ASR_MODEL_SIZE, device="cuda", compute_type="float16")
 
 print("Loading LLM (Qwen3-4B)...")
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
@@ -93,34 +89,25 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStream
 llm_tokenizer = AutoTokenizer.from_pretrained(LLM_PATH)
 llm_model = AutoModelForCausalLM.from_pretrained(
     LLM_PATH,
-    torch_dtype=torch.bfloat16,
+    dtype=torch.bfloat16,
     device_map="cuda:0",
 )
 
-print("Loading TTS (Qwen3-TTS)...")
-from qwen_tts import Qwen3TTSModel
+print("Loading TTS (Kokoro)...")
+from kokoro import KPipeline
 
-# Qwen3TTSModel.from_pretrained() doesn't take a `device` kwarg — it loads
-# onto CPU by default. The underlying nn.Module lives at `.model` and has a
-# normal `.to()`; the wrapper's own `.device` attribute is a plain writable
-# attribute (not derived automatically), so it must be set explicitly too or
-# downstream calls (e.g. create_voice_clone_prompt) will build tensors on the
-# wrong device and crash with a device-mismatch error.
-tts_model = Qwen3TTSModel.from_pretrained(TTS_PATH)
-tts_model.model = tts_model.model.to("cuda:0")
-tts_model.device = "cuda:0"
+tts_pipeline = KPipeline(lang_code=TTS_LANG_CODE)
 
-voice_clone_prompt = tts_model.create_voice_clone_prompt(REF_AUDIO, ref_text=REF_TEXT)
-
+print("Warming up models...")
+_ = list(tts_pipeline("Warming up.", voice=TTS_VOICE))
 print("All models loaded.")
 
 # ---------------------------------------------------------------------------
 # Conversation memory
 #
-# The LLM itself is stateless — "memory" means re-sending recent turns as
-# part of the input every time. This is a single global history: fine for a
-# single-user demo, but multiple concurrent users would need per-session
-# history (e.g. keyed by a client-supplied session id) instead.
+# The LLM is stateless; "memory" means re-sending recent turns every request.
+# Single global history — fine for one user, would need per-session keying for
+# concurrent users.
 # ---------------------------------------------------------------------------
 
 history: deque = deque(maxlen=HISTORY_TURNS * 2)
@@ -136,15 +123,22 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
-    # Without this, the browser can't read custom response headers
-    # (e.g. X-User-Text) even though the request itself succeeds.
+    # Required for the browser to read X-User-Text / X-Reply-Text.
     expose_headers=["*"],
 )
 
 
 @app.get("/")
 def health():
-    return {"status": "ok", "turns": len(history) // 2}
+    return {
+        "status": "ok",
+        "turns": len(history) // 2,
+        "stack": {
+            "asr": f"faster-whisper {ASR_MODEL_SIZE}",
+            "llm": "Qwen3-4B",
+            "tts": f"Kokoro ({TTS_VOICE})",
+        },
+    }
 
 
 @app.post("/reset")
@@ -154,13 +148,12 @@ def reset():
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 
 def convert_to_wav(raw_bytes: bytes) -> str:
-    """Browsers record webm/opus, not wav. FunASR needs 16kHz mono PCM wav,
-    so normalize with ffmpeg regardless of the input format."""
+    """Browsers record webm/opus; normalize to 16kHz mono PCM wav for ASR."""
     with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as f_in:
         f_in.write(raw_bytes)
         in_path = f_in.name
@@ -180,9 +173,9 @@ def convert_to_wav(raw_bytes: bytes) -> str:
 
 def run_asr(wav_path: str) -> str:
     t0 = time.time()
-    res = asr_model.generate(input=wav_path)
-    text = res[0]["text"]
-    print(f"[ASR] {time.time()-t0:.2f}s  -> {text!r}")
+    segments, info = asr_model.transcribe(wav_path, language=ASR_LANGUAGE)
+    text = " ".join(seg.text for seg in segments).strip()
+    print(f"[ASR] {time.time()-t0:.2f}s -> {text!r}")
     return text
 
 
@@ -195,13 +188,15 @@ def build_messages(user_text: str):
 
 
 def synthesize(text: str) -> tuple[np.ndarray, int]:
-    audio_chunks, sr = tts_model.generate_voice_clone(
-        text=text,
-        voice_clone_prompt=voice_clone_prompt,
-        non_streaming_mode=False,
-    )
-    audio = np.concatenate(audio_chunks) if isinstance(audio_chunks, list) else audio_chunks
-    return audio, sr
+    """Kokoro yields (graphemes, phonemes, audio) tuples. At RTF ~0.02 the
+    whole utterance is effectively instant, so just collect and concatenate."""
+    chunks = [chunk for _, _, chunk in tts_pipeline(text, voice=TTS_VOICE)]
+    if not chunks:
+        return np.zeros(0, dtype=np.float32), TTS_SAMPLE_RATE
+    audio = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+    if hasattr(audio, "numpy"):  # torch tensor -> numpy
+        audio = audio.numpy()
+    return audio, TTS_SAMPLE_RATE
 
 
 def audio_to_wav_bytes(audio: np.ndarray, sr: int) -> bytes:
@@ -217,6 +212,7 @@ def audio_to_wav_bytes(audio: np.ndarray, sr: int) -> bytes:
 
 @app.post("/chat")
 async def chat(file: UploadFile = File(...)):
+    t_request = time.time()
     raw = await file.read()
     wav_path = convert_to_wav(raw)
 
@@ -227,15 +223,15 @@ async def chat(file: UploadFile = File(...)):
     inputs = llm_tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
-        enable_thinking=False,  # must be set explicitly, or latency spikes
+        enable_thinking=False,  # must be explicit or latency spikes
         return_tensors="pt",
     ).to("cuda:0")
 
     output_ids = llm_model.generate(inputs, max_new_tokens=MAX_NEW_TOKENS)
     reply = llm_tokenizer.decode(
         output_ids[0][inputs.shape[-1]:], skip_special_tokens=True
-    )
-    print(f"[LLM] {time.time()-t0:.2f}s  -> {reply!r}")
+    ).strip()
+    print(f"[LLM] {time.time()-t0:.2f}s -> {reply!r}")
 
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": reply})
@@ -243,6 +239,7 @@ async def chat(file: UploadFile = File(...)):
     t0 = time.time()
     audio, sr = synthesize(reply)
     print(f"[TTS] {time.time()-t0:.2f}s")
+    print(f"[TOTAL] {time.time()-t_request:.2f}s")
 
     wav_bytes = audio_to_wav_bytes(audio, sr)
 
@@ -250,9 +247,8 @@ async def chat(file: UploadFile = File(...)):
         content=wav_bytes,
         media_type="audio/wav",
         headers={
-            # HTTP headers can only carry latin-1 bytes, so non-ASCII text
-            # (e.g. Chinese) must be percent-encoded here and decoded with
-            # decodeURIComponent() on the client side.
+            # HTTP headers are latin-1 only, so percent-encode and decode
+            # with decodeURIComponent() on the client.
             "X-User-Text": quote(user_text),
             "X-Reply-Text": quote(reply),
         },
@@ -262,12 +258,9 @@ async def chat(file: UploadFile = File(...)):
 # ---------------------------------------------------------------------------
 # POST /chat_stream — streaming, sentence-level pipeline
 #
-# The LLM's output is streamed token-by-token via a background thread +
-# TextIteratorStreamer. As text accumulates, each time a sentence boundary is
-# hit the buffered sentence is immediately sent to TTS and the resulting
-# audio is yielded to the client — while the LLM keeps generating the next
-# sentence in parallel. This is what takes time-to-first-audio from ~12s
-# (wait for the whole reply, then synthesize all of it) down to ~2s.
+# With Kokoro the point of streaming has changed: synthesis is essentially
+# free, so this exists to start speaking before the LLM has finished
+# generating, not to hide slow TTS.
 # ---------------------------------------------------------------------------
 
 
@@ -323,7 +316,7 @@ async def chat_stream(file: UploadFile = File(...)):
                 ) + "\n"
                 buf = ""
 
-        # flush whatever's left in the buffer (reply didn't end on punctuation)
+        # flush any trailing text that didn't end on punctuation
         if buf.strip():
             audio, sr = synthesize(buf)
             if first_audio_time is None:
@@ -338,6 +331,9 @@ async def chat_stream(file: UploadFile = File(...)):
 
         history.append({"role": "user", "content": user_text})
         history.append({"role": "assistant", "content": full_reply})
+
+        print(f"[STREAM] first_audio={first_audio_time:.2f}s "
+              f"total={time.time()-t_start:.2f}s segments={n_segments}")
 
         yield json.dumps(
             {
