@@ -32,3 +32,10 @@ Thumbs.db
 # Logs
 *.log
 nohup.out
+
+# Render outputs — regenerable from the npz, and big
+*.mp4
+*.npz
+*.bmp
+_framecheck.png
+latency_report.*

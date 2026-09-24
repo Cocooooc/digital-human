@@ -31,7 +31,7 @@ import re
 import subprocess
 import tempfile
 import time
-from collections import deque
+from collections import defaultdict, deque
 from threading import Thread
 from urllib.parse import quote
 
@@ -140,6 +140,77 @@ app.add_middleware(
 )
 
 
+# ---------------------------------------------------------------------------
+# Latency accounting
+#
+# The server already printed per-stage timings, but a log line answers "how
+# long did that one turn take", which is the wrong question: latency varies
+# with what the user said and how much the model chose to say back, so a
+# single turn says almost nothing. What matters is the distribution, and
+# specifically the tail — a median of 0.9s with a P95 of 4s is a system that
+# feels broken one turn in twenty.
+#
+# A bounded deque per stage keeps this free: no storage growth, no database,
+# and the numbers are always for the recent past rather than diluted by
+# whatever happened at startup.
+# ---------------------------------------------------------------------------
+
+TIMINGS = defaultdict(lambda: deque(maxlen=500))
+
+
+def record(stage: str, seconds: float):
+    TIMINGS[stage].append(seconds)
+
+
+def percentile(values, q):
+    """Nearest-rank, so the result is always an observed value. With a few
+    dozen samples, interpolating invents numbers the system never produced."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    k = max(0, min(len(ordered) - 1, int(round(q / 100 * len(ordered) + 0.5)) - 1))
+    return ordered[k]
+
+
+def summarise(values):
+    v = list(values)
+    if not v:
+        return None
+    return {
+        "count": len(v),
+        "mean": round(sum(v) / len(v), 3),
+        "p50": round(percentile(v, 50), 3),
+        "p95": round(percentile(v, 95), 3),
+        "max": round(max(v), 3),
+    }
+
+
+@app.get("/stats")
+def stats():
+    """Per-stage latency over the last 500 turns.
+
+    'total' is the server's own span; it excludes upload and playback, so the
+    number a user actually feels is a little larger. Compare stages to each
+    other here, and trust the client's end-to-end figure for the absolute.
+    """
+    out = {k: summarise(v) for k, v in TIMINGS.items()}
+    counted = [k for k in ("asr", "llm", "tts") if out.get(k)]
+    if counted and out.get("total"):
+        accounted = sum(out[k]["p50"] for k in counted)
+        out["_note"] = {
+            "stages_p50_sum": round(accounted, 3),
+            "total_p50": out["total"]["p50"],
+            "unaccounted": round(out["total"]["p50"] - accounted, 3),
+        }
+    return out
+
+
+@app.post("/stats/reset")
+def stats_reset():
+    TIMINGS.clear()
+    return {"status": "cleared"}
+
+
 @app.get("/")
 def health():
     return {
@@ -187,7 +258,9 @@ def run_asr(wav_path: str) -> str:
     t0 = time.time()
     segments, info = asr_model.transcribe(wav_path, language=ASR_LANGUAGE)
     text = " ".join(seg.text for seg in segments).strip()
-    print(f"[ASR] {time.time()-t0:.2f}s -> {text!r}")
+    dt = time.time() - t0
+    record("asr", dt)
+    print(f"[ASR] {dt:.2f}s -> {text!r}")
     return text
 
 
@@ -276,7 +349,10 @@ async def chat(file: UploadFile = File(...)):
         output_ids[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True
     ).strip()
     emotion, reply = parse_emotion(raw_reply)
-    print(f"[LLM] {time.time()-t0:.2f}s -> [{emotion}] {reply!r}")
+    dt_llm = time.time() - t0
+    record("llm", dt_llm)
+    record("llm_tokens", float(output_ids.shape[-1] - inputs["input_ids"].shape[-1]))
+    print(f"[LLM] {dt_llm:.2f}s -> [{emotion}] {reply!r}")
 
     # Store the untagged text in history — the tag is presentation metadata,
     # not part of the conversation.
@@ -285,8 +361,18 @@ async def chat(file: UploadFile = File(...)):
 
     t0 = time.time()
     audio, sr, phonemes = synthesize(reply)
-    print(f"[TTS] {time.time()-t0:.2f}s")
-    print(f"[TOTAL] {time.time()-t_request:.2f}s")
+    dt_tts = time.time() - t0
+    record("tts", dt_tts)
+    # RTF, not wall clock: a synthesis that took longer because the reply was
+    # longer is not slower. Only the ratio is comparable across turns.
+    audio_sec = len(audio) / sr if sr else 0.0
+    if audio_sec > 0:
+        record("tts_rtf", dt_tts / audio_sec)
+        record("speech_seconds", audio_sec)
+    dt_total = time.time() - t_request
+    record("total", dt_total)
+    print(f"[TTS] {dt_tts:.2f}s (RTF {dt_tts/max(audio_sec,1e-6):.3f})")
+    print(f"[TOTAL] {dt_total:.2f}s")
 
     wav_bytes = audio_to_wav_bytes(audio, sr)
 
@@ -409,6 +495,9 @@ async def chat_stream(file: UploadFile = File(...)):
         history.append({"role": "user", "content": user_text})
         history.append({"role": "assistant", "content": clean_reply})
 
+        if first_audio_time is not None:
+            record("stream_first_audio", first_audio_time)
+        record("stream_total", time.time() - t_start)
         print(f"[STREAM] first_audio={(first_audio_time or 0):.2f}s "
               f"total={time.time()-t_start:.2f}s segments={n_segments} "
               f"emotion={emotion or DEFAULT_EMOTION}")

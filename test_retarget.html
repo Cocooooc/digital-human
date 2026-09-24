@@ -1,0 +1,1224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SMPL-X → VRM Retarget Test</title>
+<style>
+  :root {
+    --bg:#f7f7f8; --surface:#fff; --border:#e3e3e6;
+    --text:#1a1a1c; --dim:#6b6b70; --accent:#2563eb; --ok:#16a34a; --bad:#dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16161a; --surface:#1e1e23; --border:#2e2e35; --text:#eeeef0; --dim:#9a9aa2; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    display:flex;justify-content:center;padding:20px 16px 40px}
+  .app{width:100%;max-width:720px}
+  h1{font-size:17px;margin:0 0 3px;font-weight:650}
+  .sub{color:var(--dim);font-size:12.5px;margin-bottom:16px}
+
+  .stage{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+    padding:14px;margin-bottom:12px;position:relative}
+  #viewport{width:100%;height:420px;border-radius:10px;overflow:hidden;position:relative}
+  #viewport canvas{display:block;width:100%;height:100%}
+  .overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px}
+  .overlay-inner{text-align:center;max-width:420px;font-size:13px;color:var(--dim);line-height:1.6}
+  code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:12px}
+
+  .row{display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap}
+  input[type=text]{flex:1;min-width:180px;font:inherit;font-size:12.5px;padding:8px 10px;
+    border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text)}
+  button{font:inherit;font-size:13.5px;padding:9px 14px;border:1px solid var(--border);
+    border-radius:9px;background:var(--surface);color:var(--text);cursor:pointer}
+  button:hover{border-color:var(--dim)}
+  button:disabled{opacity:.45;cursor:default}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.recording{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:600}
+  .rec-timer{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:var(--dim);min-width:52px}
+
+  .controls{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+    padding:12px;margin-bottom:12px}
+  .slider-row{display:flex;align-items:center;gap:10px;margin-top:8px}
+  .slider-row label{flex:0 0 150px;font-size:12px;color:var(--dim)}
+  .slider-row input[type=range]{flex:1}
+  .slider-row output{flex:0 0 52px;text-align:right;font-size:11.5px;color:var(--dim);
+    font-family:ui-monospace,Menlo,monospace}
+  .check-row{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--dim);margin-top:10px}
+  .check-row label{display:flex;align-items:center;gap:5px;cursor:pointer}
+  select{font:inherit;font-size:12.5px;padding:6px 8px;border:1px solid var(--border);
+    border-radius:7px;background:var(--surface);color:var(--text);flex:1}
+  .probe{margin-top:10px;font-family:ui-monospace,Menlo,monospace;font-size:11px;
+    color:var(--dim);line-height:1.65;white-space:pre;overflow-x:auto}
+  .cal-head{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;font-size:13px}
+  .dim-note{color:var(--dim);font-size:11.5px}
+  .group-row{display:flex;gap:6px;flex-wrap:wrap}
+  .group-btn{font:inherit;font-size:12px;padding:6px 11px;border:1px solid var(--border);
+    border-radius:7px;background:var(--surface);color:var(--dim);cursor:pointer}
+  .group-btn.active{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .group-btn.tuned{border-color:var(--ok);color:var(--ok)}
+  .group-btn.active.tuned{color:#fff}
+
+  #status{font-size:12.5px;color:var(--dim);min-height:18px;margin-bottom:10px}
+  .log{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px;
+    font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.6;color:var(--dim);
+    max-height:260px;overflow:auto;white-space:pre-wrap}
+  .ok{color:var(--ok)} .bad{color:var(--bad)}
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.3/lib/three-vrm.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div class="app">
+
+  <h1>SMPL-X → VRM Retarget Test</h1>
+  <div class="sub">Verify the bone mapping in isolation, before wiring it into the conversation loop</div>
+
+  <div class="stage">
+    <div id="viewport">
+      <div class="overlay" id="overlay">
+        <div class="overlay-inner" id="overlayText">
+          Load a VRM model to begin.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="pickModelBtn">1. Choose VRM/GLB…</button>
+    <input type="file" id="modelPicker" accept=".vrm,.glb" hidden />
+    <input type="text" id="emageUrl" value="http://180.127.11.177:15313" />
+  </div>
+
+  <div class="row">
+    <button id="recordBtn" disabled>🎤 2. Record</button>
+    <button id="pickAudioBtn" disabled>…or choose a .wav</button>
+    <input type="file" id="audioPicker" accept=".wav,.mp3" hidden />
+    <span id="recTimer" class="rec-timer"></span>
+  </div>
+
+  <div class="row">
+    <button id="playBtn" class="primary" disabled>3. Play motion + audio</button>
+    <button id="tposeBtn" disabled>Reset to rest pose</button>
+  </div>
+
+  <div class="row">
+    <button id="probeBtn" disabled>🔬 Force L-arm down 90°</button>
+    <button id="readBackBtn" disabled>🔎 Read bone rotation back</button>
+    <button id="measureRestBtn" disabled>📐 Measure VRM rest pose</button>
+  </div>
+
+  <div id="status"></div>
+
+  <div class="controls">
+    <div class="slider-row">
+      <label>Axis convention</label>
+      <select id="axisConv">
+        <option value="auto">auto — read the frame off the model</option>
+        <option value="none">as-is (x, y, z)</option>
+        <option value="flipYZ">flip Y,Z — 180° about X</option>
+        <option value="flipXZ">flip X,Z — 180° about Y</option>
+        <option value="flipXY">flip X,Y — 180° about Z</option>
+        <option value="negate">negate all (invert rotation)</option>
+        <option value="swapYZ">swap Y,Z (Z-up → Y-up)</option>
+      </select>
+    </div>
+    <div class="check-row">
+      <label><input type="checkbox" id="useAutoFit" checked /> Auto-fit from rest pose</label>
+      <label><input type="checkbox" id="composeRest" /> Compose with rest pose</label>
+      <label><input type="checkbox" id="applyRoot" /> Apply root (hips)</label>
+      <label><input type="checkbox" id="applyFingers" checked /> Fingers</label>
+      <label><input type="checkbox" id="applyLegs" checked /> Legs</label>
+      <label><input type="checkbox" id="freezeFrame" /> Freeze on frame</label>
+    </div>
+    <div class="slider-row">
+      <label>Motion scale</label>
+      <input type="range" id="scaleSlider" min="0" max="200" value="100" />
+      <output id="scaleOut">100%</output>
+    </div>
+    <div class="slider-row">
+      <label>Frame (when frozen)</label>
+      <input type="range" id="frameSlider" min="0" max="0" value="0" disabled />
+      <output id="frameOut">—</output>
+    </div>
+    <div class="probe" id="probe"></div>
+  </div>
+
+  <div class="controls">
+    <div class="cal-head">
+      <strong>Per-bone calibration</strong>
+      <span class="dim-note">pick a group, nudge until the pose looks right</span>
+    </div>
+
+    <div class="group-row" id="groupRow"></div>
+
+    <div class="slider-row">
+      <label>Correction mode</label>
+      <select id="calMode">
+        <option value="conjugate">conjugate — R q R&#8315;&#185; (fixes rotation axes)</option>
+        <option value="premultiply">pre-multiply — R q (fixes static pose only)</option>
+        <option value="both">both</option>
+      </select>
+    </div>
+
+    <div class="slider-row">
+      <label>Offset about X</label>
+      <input type="range" id="calX" min="-180" max="180" value="0" />
+      <output id="calXOut">0°</output>
+    </div>
+    <div class="slider-row">
+      <label>Offset about Y</label>
+      <input type="range" id="calY" min="-180" max="180" value="0" />
+      <output id="calYOut">0°</output>
+    </div>
+    <div class="slider-row">
+      <label>Offset about Z</label>
+      <input type="range" id="calZ" min="-180" max="180" value="0" />
+      <output id="calZOut">0°</output>
+    </div>
+
+    <div class="check-row">
+      <label><input type="checkbox" id="mirrorSides" checked /> Mirror to opposite side</label>
+      <button id="resetCalBtn" style="padding:5px 10px;font-size:12px">Reset this group</button>
+      <button id="exportCalBtn" style="padding:5px 10px;font-size:12px">Export config</button>
+    </div>
+  </div>
+
+  <div class="log" id="log">Waiting for a model…</div>
+
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
+
+// ===========================================================================
+// SMPL-X joint order → VRM humanoid bone names.
+//
+// SMPL-X packs 55 joints × 3 axis-angle values into 165 numbers per frame, in
+// this fixed order: global_orient, 21 body joints, jaw, two eyes, 15 left-hand
+// joints, 15 right-hand joints. Both skeletons are humanoid and both store
+// rotations relative to the parent, so the mapping is mostly one-to-one — the
+// work is in getting the order right and handling naming differences.
+//
+// null entries are joints we deliberately don't drive.
+// ===========================================================================
+const SMPLX_TO_VRM = [
+  "hips",            //  0 pelvis (global orientation)
+  "leftUpperLeg",    //  1 left_hip
+  "rightUpperLeg",   //  2 right_hip
+  "spine",           //  3 spine1
+  "leftLowerLeg",    //  4 left_knee
+  "rightLowerLeg",   //  5 right_knee
+  "chest",           //  6 spine2
+  "leftFoot",        //  7 left_ankle
+  "rightFoot",       //  8 right_ankle
+  "upperChest",      //  9 spine3
+  "leftToes",        // 10 left_foot
+  "rightToes",       // 11 right_foot
+  "neck",            // 12 neck
+  "leftShoulder",    // 13 left_collar
+  "rightShoulder",   // 14 right_collar
+  "head",            // 15 head
+  "leftUpperArm",    // 16 left_shoulder
+  "rightUpperArm",   // 17 right_shoulder
+  "leftLowerArm",    // 18 left_elbow
+  "rightLowerArm",   // 19 right_elbow
+  "leftHand",        // 20 left_wrist
+  "rightHand",       // 21 right_wrist
+  "jaw",             // 22 jaw
+  "leftEye",         // 23 left_eye
+  "rightEye",        // 24 right_eye
+
+  // Left hand, SMPL-X finger order: index, middle, pinky, ring, thumb.
+  // VRM calls the pinky "Little", and VRM 1.0 renamed the first thumb joint
+  // to Metacarpal (0.x called it Proximal) — resolved at runtime against the
+  // bones the loaded model actually exposes.
+  "leftIndexProximal",    "leftIndexIntermediate",    "leftIndexDistal",     // 25-27
+  "leftMiddleProximal",   "leftMiddleIntermediate",   "leftMiddleDistal",    // 28-30
+  "leftLittleProximal",   "leftLittleIntermediate",   "leftLittleDistal",    // 31-33
+  "leftRingProximal",     "leftRingIntermediate",     "leftRingDistal",      // 34-36
+  "leftThumbMetacarpal",  "leftThumbProximal",        "leftThumbDistal",     // 37-39
+
+  "rightIndexProximal",   "rightIndexIntermediate",   "rightIndexDistal",    // 40-42
+  "rightMiddleProximal",  "rightMiddleIntermediate",  "rightMiddleDistal",   // 43-45
+  "rightLittleProximal",  "rightLittleIntermediate",  "rightLittleDistal",   // 46-48
+  "rightRingProximal",    "rightRingIntermediate",    "rightRingDistal",     // 49-51
+  "rightThumbMetacarpal", "rightThumbProximal",       "rightThumbDistal",    // 52-54
+];
+
+// VRM 0.x used different thumb bone names; try the 1.0 name first, then fall back.
+const BONE_ALIASES = {
+  leftThumbMetacarpal:  ["leftThumbMetacarpal", "leftThumbProximal"],
+  leftThumbProximal:    ["leftThumbProximal", "leftThumbIntermediate"],
+  rightThumbMetacarpal: ["rightThumbMetacarpal", "rightThumbProximal"],
+  rightThumbProximal:   ["rightThumbProximal", "rightThumbIntermediate"],
+};
+
+const LEG_BONES = new Set([
+  "leftUpperLeg", "rightUpperLeg", "leftLowerLeg", "rightLowerLeg",
+  "leftFoot", "rightFoot", "leftToes", "rightToes",
+]);
+const FINGER_RE = /(Index|Middle|Little|Ring|Thumb)/;
+
+// ===========================================================================
+// Scene
+// ===========================================================================
+const viewport = document.getElementById("viewport");
+const overlay = document.getElementById("overlay");
+const overlayText = document.getElementById("overlayText");
+const logEl = document.getElementById("log");
+const statusEl = document.getElementById("status");
+
+const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+viewport.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, viewport.clientWidth / viewport.clientHeight, 0.1, 50);
+scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+const key = new THREE.DirectionalLight(0xffffff, 1.4); key.position.set(1, 1.8, 2.5); scene.add(key);
+const fill = new THREE.DirectionalLight(0xdfe8ff, 0.5); fill.position.set(-1.5, 0.6, 1.2); scene.add(fill);
+
+const grid = new THREE.GridHelper(4, 8, 0x888888, 0xcccccc);
+grid.material.opacity = 0.25; grid.material.transparent = true;
+scene.add(grid);
+
+addEventListener("resize", () => {
+  camera.aspect = viewport.clientWidth / viewport.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+});
+
+function log(msg, cls = "") {
+  logEl.innerHTML += (cls ? `<span class="${cls}">${msg}</span>` : msg) + "\n";
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ===========================================================================
+// Model
+// ===========================================================================
+let vrm = null;
+let boneNodes = {};        // smplx index → THREE.Object3D
+let autoCorr = {};         // smplx index → per-bone correction, computed not guessed
+let parentRestInv = {};    // smplx index → inverse world rotation of the parent at rest
+let restQuats = {};        // smplx index → the model's rest rotation
+const clock = new THREE.Clock();
+
+async function loadVRM(url, label) {
+  overlay.style.display = "flex";
+  overlayText.textContent = "Loading " + label + "…";
+  logEl.innerHTML = "";
+
+  if (vrm) { scene.remove(vrm.scene); VRMUtils.deepDispose(vrm.scene); vrm = null; }
+
+  const loader = new GLTFLoader();
+  loader.register((p) => new VRMLoaderPlugin(p));
+
+  try {
+    const gltf = await loader.loadAsync(url);
+    vrm = gltf.userData.vrm;
+    if (!vrm) throw new Error("no VRM data in that file");
+
+    VRMUtils.combineSkeletons(gltf.scene);
+    vrm.scene.traverse((o) => { o.frustumCulled = false; });
+    if (vrm.meta?.metaVersion === "0") vrm.scene.rotation.y = Math.PI;
+    scene.add(vrm.scene);
+
+    resolveBones();
+    frameBody();
+
+    overlay.style.display = "none";
+    document.getElementById("recordBtn").disabled = false;
+    document.getElementById("pickAudioBtn").disabled = false;
+    document.getElementById("tposeBtn").disabled = false;
+    document.getElementById("probeBtn").disabled = false;
+    document.getElementById("readBackBtn").disabled = false;
+    document.getElementById("measureRestBtn").disabled = false;
+    statusEl.textContent = "Model loaded. Now pick a .wav to generate motion for.";
+  } catch (e) {
+    console.error(e);
+    overlayText.innerHTML = `Couldn't load <code>${label}</code>.<br>${e.message}`;
+  }
+}
+
+// Resolve each SMPL-X slot against the bones this model actually has, and
+// remember its rest rotation. Reporting which slots resolved is the fastest
+// way to catch a mapping mistake — a model missing every finger looks the
+// same as a broken mapping unless you check.
+function resolveBones() {
+  boneNodes = {}; restQuats = {}; autoCorr = {}; parentRestInv = {};
+  let hit = 0; const missing = [];
+
+  for (let i = 0; i < SMPLX_TO_VRM.length; i++) {
+    const canonical = SMPLX_TO_VRM[i];
+    if (!canonical) continue;
+    const candidates = BONE_ALIASES[canonical] || [canonical];
+
+    let node = null;
+    for (const name of candidates) {
+      node = vrm.humanoid.getNormalizedBoneNode(name);
+      if (node) break;
+    }
+    if (node) {
+      boneNodes[i] = node;
+      restQuats[i] = node.quaternion.clone();
+      hit++;
+    } else {
+      missing.push(`${i}:${canonical}`);
+    }
+  }
+
+  log(`bones resolved: ${hit}/55`, hit > 40 ? "ok" : "bad");
+  if (missing.length) log(`not in this model: ${missing.join(", ")}`);
+
+  const core = [0, 3, 6, 12, 15, 16, 17, 18, 19, 20, 21];
+  const coreOK = core.every((i) => boneNodes[i]);
+  log(coreOK ? "core body chain present ✓" : "MISSING CORE BONES — retarget will look broken",
+      coreOK ? "ok" : "bad");
+}
+
+function frameBody() {
+  // Frame the whole body, not just the head: the point here is to see gestures.
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const dist = size.y * 2.1;
+  camera.position.set(center.x, center.y + size.y * 0.08, center.z + dist);
+  camera.lookAt(center.x, center.y, center.z);
+}
+
+// ===========================================================================
+// Retargeting
+//
+// SMPL-X gives an axis-angle triple per joint: direction = rotation axis,
+// magnitude = angle in radians. Both skeletons store rotations relative to the
+// parent, and three-vrm's *normalized* bone nodes are already corrected for
+// each model's own rest pose — which is what makes a direct mapping viable at
+// all across different characters.
+// ===========================================================================
+const _axis = new THREE.Vector3();
+const _quat = new THREE.Quaternion();
+
+// Axis conventions to try. SMPL-X and three.js don't necessarily agree on
+// which way Y and Z point, and a mismatch shows up as limbs rotating the wrong
+// way rather than as an error — so make it switchable and find out empirically.
+const AXIS_CONVENTIONS = {
+  none:   (x, y, z) => [x, y, z],
+  flipYZ: (x, y, z) => [x, -y, -z],
+  flipXZ: (x, y, z) => [-x, y, -z],
+  flipXY: (x, y, z) => [-x, -y, z],
+  negate: (x, y, z) => [-x, -y, -z],
+  swapYZ: (x, y, z) => [x, z, y],
+};
+
+// ---------------------------------------------------------------------------
+// Per-bone calibration.
+//
+// Flipping axes fixes the *global* frame, but two differences remain: each
+// bone has its own local axes, and the two rest poses aren't identical. Both
+// show up as a constant offset per bone — which is exactly what a fixed
+// correction rotation cancels out.
+//
+// Bones are tuned in groups because symmetric joints share the same problem,
+// and talking gestures only really involve six or so groups.
+// ---------------------------------------------------------------------------
+const BONE_GROUPS = {
+  shoulders: { label: "Shoulders", idx: [16, 17] },
+  elbows:    { label: "Elbows",    idx: [18, 19] },
+  wrists:    { label: "Wrists",    idx: [20, 21] },
+  collar:    { label: "Collar",    idx: [13, 14] },
+  spine:     { label: "Spine",     idx: [3, 6, 9] },
+  head:      { label: "Neck/Head", idx: [12, 15] },
+  legs:      { label: "Legs",      idx: [1, 2, 4, 5, 7, 8] },
+  fingers:   { label: "Fingers",   idx: Array.from({length: 30}, (_, k) => 25 + k) },
+};
+
+// joint index → group name, built once
+const GROUP_OF = {};
+for (const [g, { idx }] of Object.entries(BONE_GROUPS)) {
+  for (const i of idx) GROUP_OF[i] = g;
+}
+
+// Right-side joints, for mirroring: SMPL-X alternates left/right for paired
+// joints, and the hands are two contiguous blocks.
+const RIGHT_JOINTS = new Set([2, 5, 8, 11, 14, 17, 19, 21, 24,
+                              ...Array.from({length: 15}, (_, k) => 40 + k)]);
+
+// Seeded with the first hand calibration, so a page reload never costs that
+// work again. The large shoulder/elbow numbers here are the symptom that
+// pre-multiplication was standing in for a frame change — see correctionFor().
+const corrections = {};   // group → {x, y, z} degrees
+const SEED = {
+  shoulders: { x: 180, y: 1, z: -45 },
+  elbows:    { x: 0,   y: 114, z: 100 },
+  wrists:    { x: 3,   y: 3,  z: 1 },
+  collar:    { x: -1,  y: 3,  z: 6 },
+  spine:     { x: -6,  y: 0,  z: 0 },
+  head:      { x: -6,  y: 0,  z: 0 },
+  legs:      { x: -2,  y: 0,  z: 0 },
+};
+for (const g of Object.keys(BONE_GROUPS)) {
+  corrections[g] = SEED[g] ? { ...SEED[g] } : { x: 0, y: 0, z: 0 };
+}
+
+const _corr = new THREE.Quaternion();
+const _euler = new THREE.Euler();
+const DEG = Math.PI / 180;
+
+function correctionFor(jointIdx) {
+  const g = GROUP_OF[jointIdx];
+  if (!g) return null;
+  const c = corrections[g];
+  if (!c.x && !c.y && !c.z) return null;
+
+  // Mirroring a rotation across the body's plane of symmetry negates the Y and
+  // Z components — so one slider can tune both sides of a symmetric joint.
+  const mirror = mirrorSides.checked && RIGHT_JOINTS.has(jointIdx);
+  _euler.set(c.x * DEG, (mirror ? -c.y : c.y) * DEG, (mirror ? -c.z : c.z) * DEG, "XYZ");
+  return _corr.setFromEuler(_euler);
+}
+
+function applyFrame(frame /* Float32Array(165) */) {
+  const scale = +document.getElementById("scaleSlider").value / 100;
+  const doRoot = document.getElementById("applyRoot").checked;
+  const doFingers = document.getElementById("applyFingers").checked;
+  const doLegs = document.getElementById("applyLegs").checked;
+  const compose = document.getElementById("composeRest").checked;
+  const conv = AXIS_CONVENTIONS[document.getElementById("axisConv").value];
+  const calMode = document.getElementById("calMode").value;
+  const useAuto = document.getElementById("useAutoFit").checked
+                  && Object.keys(autoCorr).length > 0;
+
+  for (let i = 0; i < 55; i++) {
+    const node = boneNodes[i];
+    if (!node) continue;
+
+    const name = SMPLX_TO_VRM[i];
+    if (i === 0 && !doRoot) continue;
+    if (!doFingers && FINGER_RE.test(name)) continue;
+    if (!doLegs && LEG_BONES.has(name)) continue;
+
+    const corrQ = correctionFor(i);
+
+    let x, y, z;
+    if (useAuto && parentRestInv[i]) {
+      // Frame read off the model instead of chosen from a menu. SMPL-X states
+      // its rotations in world terms; a bone's quaternion is interpreted in its
+      // parent's frame. Undoing the parent's rest rotation converts between the
+      // two — and it does it per bone, so it stays correct for a model whose
+      // rig is rotated in ways a global flip can't describe.
+      _axis.set(frame[i * 3], frame[i * 3 + 1], frame[i * 3 + 2]);
+      _axis.applyQuaternion(parentRestInv[i]);
+      x = _axis.x; y = _axis.y; z = _axis.z;
+    } else {
+      [x, y, z] = conv(frame[i * 3], frame[i * 3 + 1], frame[i * 3 + 2]);
+    }
+    const angle = Math.hypot(x, y, z);
+
+    if (angle < 1e-8) {
+      _quat.identity();
+    } else {
+      _axis.set(x / angle, y / angle, z / angle);
+
+      // Conjugation, done the cheap way. R·q·R⁻¹ keeps the rotation *amount*
+      // and only moves the axis it turns about, so rotating the axis vector by
+      // R is the same operation for a fraction of the arithmetic. This is the
+      // correct fix for two skeletons disagreeing about which way an axis
+      // points — pre-multiplication can only mask it one frame at a time.
+      if (!useAuto && corrQ && (calMode === "conjugate" || calMode === "both")) {
+        _axis.applyQuaternion(corrQ);
+      }
+      _quat.setFromAxisAngle(_axis, angle * scale);
+    }
+
+    if (useAuto && autoCorr[i]) {
+      // Post-multiply, and the order is not arbitrary. The correction says
+      // "carry this model's rest direction onto SMPL-X's"; SMPL-X's rotation
+      // then starts from there. Written out in world terms the total is
+      // q_smplx · q_correction, so the correction goes on the right. Swapping
+      // them rotates the correction by the motion, which is wrong in a way
+      // that only shows up once the avatar starts moving.
+      _quat.multiply(autoCorr[i]);
+    }
+
+    if (corrQ && useAuto) {
+      // With the swing already fitted, the slider's only remaining job is
+      // twist about the bone's own axis — a local trim, so it goes on the
+      // right too.
+      _quat.multiply(corrQ);
+    } else if (corrQ && (calMode === "premultiply" || calMode === "both")) {
+      // Left-multiply: "before doing what SMPL-X asked, rotate this bone into
+      // the orientation SMPL-X assumed it started from". Fixes a static pose,
+      // but leaves the rotation happening about the original axes.
+      _quat.premultiply(corrQ);
+    }
+
+    // Replace vs compose: in three-vrm's *normalized* bone space, identity
+    // already means T-pose, and SMPL-X angles are also relative to its own
+    // T-pose — so replacing should be right. But if a model's normalized rest
+    // isn't exactly identity, composing onto it is what works.
+    if (compose) {
+      node.quaternion.copy(restQuats[i]).multiply(_quat);
+    } else {
+      node.quaternion.copy(_quat);
+    }
+  }
+
+  updateProbe(frame);
+}
+
+// Show the raw numbers for the joints that matter most for "why are the arms
+// stuck in a T-pose". If the shoulder values are near zero, the data itself
+// says T-pose; if they're large but nothing moves, the application is wrong.
+const PROBE_JOINTS = [
+  [16, "L upperArm"], [17, "R upperArm"],
+  [18, "L lowerArm"], [19, "R lowerArm"],
+  [3, "spine"], [15, "head"],
+];
+const probeEl = document.getElementById("probe");
+let probeTick = 0;
+
+function updateProbe(frame) {
+  if (probeTick++ % 6) return;   // ~10Hz, enough to read
+  let out = "joint          axis-angle (x, y, z)        magnitude\n";
+  for (const [i, label] of PROBE_JOINTS) {
+    const x = frame[i * 3], y = frame[i * 3 + 1], z = frame[i * 3 + 2];
+    const mag = Math.hypot(x, y, z);
+    const deg = (mag * 180 / Math.PI).toFixed(0);
+    out += `${label.padEnd(14)} ${x.toFixed(3).padStart(7)} ${y.toFixed(3).padStart(7)} ` +
+           `${z.toFixed(3).padStart(7)}   ${mag.toFixed(3)} rad = ${deg}°\n`;
+  }
+  probeEl.textContent = out;
+}
+
+function resetPose() {
+  for (const i in boneNodes) boneNodes[i].quaternion.copy(restQuats[i]);
+}
+
+// ===========================================================================
+// Motion playback, driven by the audio clock so the two can't drift
+// ===========================================================================
+let motionData = null;   // { fps, frames, motion: Float32Array, expression, trans }
+let probeForced = false; // a manual probe pose is showing; don't let anything overwrite it
+let audioEl = null;
+let playing = false;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = clock.getDelta();
+
+  if (vrm) {
+    const frozen = document.getElementById("freezeFrame").checked;
+
+    if (motionData && (frozen || (playing && audioEl))) {
+      // Freezing on a chosen frame is the only practical way to judge whether
+      // a pose is correct — motion at 30fps hides everything.
+      const idx = frozen
+        ? +document.getElementById("frameSlider").value
+        : Math.min(motionData.frames - 1,
+                   Math.floor(audioEl.currentTime * motionData.fps));
+      const off = Math.min(idx, motionData.frames - 1) * 165;
+      applyFrame(motionData.motion.subarray(off, off + 165));
+    }
+    vrm.update(delta);
+  }
+  renderer.render(scene, camera);
+}
+
+// ===========================================================================
+// Wiring
+// ===========================================================================
+let pickedModelUrl = null, pickedAudioFile = null;
+
+document.getElementById("pickModelBtn").onclick = () =>
+  document.getElementById("modelPicker").click();
+
+document.getElementById("modelPicker").onchange = (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  if (pickedModelUrl) URL.revokeObjectURL(pickedModelUrl);
+  pickedModelUrl = URL.createObjectURL(f);
+  loadVRM(pickedModelUrl, f.name);
+};
+
+// ===========================================================================
+// Recording
+//
+// MediaRecorder produces webm/opus, but the server reads audio with soundfile
+// (libsndfile), which doesn't handle webm. Rather than add an ffmpeg step
+// server-side, decode and re-encode to 16kHz mono WAV here — the browser
+// already has the decoder, and EMAGE wants 16kHz mono anyway, so doing the
+// resample client-side also shrinks the upload.
+// ===========================================================================
+let mediaRecorder = null, recChunks = [], recording = false;
+let recStart = 0, recTimerId = null;
+
+const recordBtn = document.getElementById("recordBtn");
+const recTimer = document.getElementById("recTimer");
+
+recordBtn.onclick = async () => {
+  if (recording) {
+    mediaRecorder.stop();
+    mediaRecorder.stream.getTracks().forEach((t) => t.stop());
+    recording = false;
+    recordBtn.textContent = "🎤 2. Record";
+    recordBtn.classList.remove("recording");
+    clearInterval(recTimerId);
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true },
+    });
+    recChunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = (e) => recChunks.push(e.data);
+    mediaRecorder.onstop = async () => {
+      const webm = new Blob(recChunks, { type: "audio/webm" });
+      statusEl.textContent = "Converting to 16kHz mono WAV…";
+      try {
+        const wav = await webmToWav16k(webm);
+        log(`\n🎤 recorded ${(wav.size / 1024).toFixed(0)} KB of 16kHz mono WAV`);
+        await sendToEmage(new File([wav], "recording.wav", { type: "audio/wav" }));
+      } catch (err) {
+        console.error(err);
+        log(`✗ conversion failed: ${err.message}`, "bad");
+        statusEl.textContent = "Audio conversion failed: " + err.message;
+      }
+    };
+    mediaRecorder.start();
+    recording = true;
+    recStart = performance.now();
+    recordBtn.textContent = "⏹ Stop";
+    recordBtn.classList.add("recording");
+    statusEl.textContent = "Recording — say a sentence or two, then Stop.";
+    recTimerId = setInterval(() => {
+      recTimer.textContent = ((performance.now() - recStart) / 1000).toFixed(1) + "s";
+    }, 100);
+  } catch (err) {
+    statusEl.textContent = "Microphone unavailable: " + err.message;
+  }
+};
+
+async function webmToWav16k(blob) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+
+  // OfflineAudioContext does the resample and the stereo→mono downmix in one
+  // pass, and does it properly (filtered), unlike naive sample dropping.
+  const targetRate = 16000;
+  const offline = new OfflineAudioContext(
+    1, Math.ceil(decoded.duration * targetRate), targetRate);
+  const src = offline.createBufferSource();
+  src.buffer = decoded;
+  src.connect(offline.destination);
+  src.start();
+  const rendered = await offline.startRendering();
+  ctx.close();
+
+  return encodeWav(rendered.getChannelData(0), targetRate);
+}
+
+function encodeWav(samples, sampleRate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buf);
+  const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+
+  str(0, "RIFF");
+  view.setUint32(4, 36 + samples.length * 2, true);
+  str(8, "WAVE");
+  str(12, "fmt ");
+  view.setUint32(16, 16, true);          // PCM chunk size
+  view.setUint16(20, 1, true);           // format = PCM
+  view.setUint16(22, 1, true);           // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);  // byte rate
+  view.setUint16(32, 2, true);           // block align
+  view.setUint16(34, 16, true);          // bits per sample
+  str(36, "data");
+  view.setUint32(40, samples.length * 2, true);
+
+  let off = 44;
+  for (let i = 0; i < samples.length; i++, off += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+document.getElementById("pickAudioBtn").onclick = () =>
+  document.getElementById("audioPicker").click();
+
+document.getElementById("audioPicker").onchange = (e) => {
+  const f = e.target.files[0];
+  if (f) sendToEmage(f);
+};
+
+async function sendToEmage(f) {
+  pickedAudioFile = f;
+  statusEl.textContent = `Generating motion for ${f.name}…`;
+  log(`→ POST ${f.name} (${(f.size/1024).toFixed(0)} KB) to EMAGE`);
+
+  const base = document.getElementById("emageUrl").value.replace(/\/$/, "");
+  const form = new FormData();
+  form.append("file", f, f.name);
+
+  const t0 = performance.now();
+  try {
+    const resp = await fetch(base + "/motion", { method: "POST", body: form });
+    if (!resp.ok) throw new Error("server returned " + resp.status);
+    const json = await resp.json();
+
+    motionData = {
+      fps: json.fps,
+      frames: json.frames,
+      motion: b64ToFloat32(json.motion),
+      expression: b64ToFloat32(json.expression),
+      trans: b64ToFloat32(json.trans),
+    };
+
+    const rt = ((performance.now() - t0) / 1000).toFixed(2);
+    log(`← ${json.frames} frames @ ${json.fps}fps for ${json.audio_duration}s audio`, "ok");
+    log(`  server: decode ${json.timing.decode}s, infer ${json.timing.infer}s | round trip ${rt}s`);
+    log(`  motion ${motionData.motion.length} floats = ${motionData.motion.length/165} frames × 165`);
+
+    const expected = json.frames * 165;
+    log(motionData.motion.length === expected
+        ? `  size check ✓`
+        : `  SIZE MISMATCH: expected ${expected}`,
+        motionData.motion.length === expected ? "ok" : "bad");
+
+    const fs = document.getElementById("frameSlider");
+    fs.max = json.frames - 1;
+    fs.value = Math.floor(json.frames / 2);   // mid-clip: past any lead-in silence
+    fs.disabled = false;
+    document.getElementById("frameOut").textContent = fs.value;
+
+    document.getElementById("playBtn").disabled = false;
+    statusEl.textContent = "Motion ready — press Play, or tick 'Freeze on frame' to inspect a pose.";
+  } catch (err) {
+    console.error(err);
+    log(`✗ ${err.message}`, "bad");
+    statusEl.textContent = "Motion generation failed: " + err.message;
+  }
+}
+
+document.getElementById("playBtn").onclick = () => {
+  if (!motionData || !pickedAudioFile) return;
+  if (audioEl) { audioEl.pause(); URL.revokeObjectURL(audioEl.src); }
+
+  audioEl = new Audio(URL.createObjectURL(pickedAudioFile));
+  audioEl.onended = () => { playing = false; statusEl.textContent = "Done."; };
+  audioEl.play();
+  playing = true;
+  statusEl.textContent = "Playing…";
+};
+
+document.getElementById("tposeBtn").onclick = () => {
+  playing = false;
+  if (audioEl) audioEl.pause();
+  resetPose();
+  probeForced = false;
+  statusEl.textContent = "Reset to rest pose.";
+};
+
+// ---------------------------------------------------------------------------
+// Direct probes.
+//
+// The motion data checks out (shoulders at ~60°, elbows at ~80° — exactly what
+// arms-down-and-bent should look like), so the failure is somewhere between
+// "set a quaternion" and "the mesh moves". These two buttons split that in
+// half without any of the retargeting logic in the way: force one bone to an
+// unmistakable pose, then read the value back after vrm.update() to see
+// whether it survived.
+// ---------------------------------------------------------------------------
+document.getElementById("probeBtn").onclick = () => {
+  document.getElementById("freezeFrame").checked = false;   // stop applyFrame fighting us
+  playing = false;
+  if (audioEl) audioEl.pause();
+
+  const bone = vrm.humanoid.getNormalizedBoneNode("leftUpperArm");
+  if (!bone) { log("✗ leftUpperArm not found at all", "bad"); return; }
+
+  // Rotating about Z swings the arm down from a T-pose in three.js's
+  // right-handed, Y-up convention.
+  bone.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -Math.PI / 2);
+  probeForced = true;
+
+  log("\n🔬 forced leftUpperArm to -90° about Z");
+  log("   if the left arm did NOT visibly drop, bone control itself is broken", "bad");
+  statusEl.textContent = "Forced pose applied — did the left arm move?";
+};
+
+document.getElementById("readBackBtn").onclick = () => {
+  const bone = vrm.humanoid.getNormalizedBoneNode("leftUpperArm");
+  if (!bone) { log("✗ leftUpperArm not found", "bad"); return; }
+
+  const q = bone.quaternion;
+  const e = new THREE.Euler().setFromQuaternion(q, "XYZ");
+  const deg = (r) => (r * 180 / Math.PI).toFixed(1);
+
+  log(`\n🔎 leftUpperArm normalized rotation right now:`);
+  log(`   quaternion (${q.x.toFixed(3)}, ${q.y.toFixed(3)}, ${q.z.toFixed(3)}, ${q.w.toFixed(3)})`);
+  log(`   euler XYZ  (${deg(e.x)}°, ${deg(e.y)}°, ${deg(e.z)}°)`);
+
+  const isIdentity = Math.abs(q.w - 1) < 0.001;
+  log(isIdentity
+      ? "   → identity: the rotation was reset or never took hold"
+      : "   → non-identity: the value IS being held on the bone",
+      isIdentity ? "bad" : "ok");
+
+  // Raw bone: what actually deforms the mesh. If normalized holds a value but
+  // raw stays at rest, the normalized→raw propagation is what's failing.
+  const raw = vrm.humanoid.getRawBoneNode?.("leftUpperArm");
+  if (raw) {
+    const rq = raw.quaternion;
+    log(`   raw bone quaternion (${rq.x.toFixed(3)}, ${rq.y.toFixed(3)}, ` +
+        `${rq.z.toFixed(3)}, ${rq.w.toFixed(3)})`);
+  }
+};
+
+const scaleSlider = document.getElementById("scaleSlider");
+scaleSlider.oninput = () =>
+  document.getElementById("scaleOut").textContent = scaleSlider.value + "%";
+
+const frameSlider = document.getElementById("frameSlider");
+frameSlider.oninput = () =>
+  document.getElementById("frameOut").textContent = frameSlider.value;
+
+// ---------------------------------------------------------------------------
+// Calibration UI wiring.
+//
+// The sliders write straight into `corrections`, and the animation loop reads
+// it every frame — so with "Freeze on frame" ticked you see the pose change as
+// you drag, which is the only way to judge whether a correction is right.
+// ---------------------------------------------------------------------------
+const mirrorSides = document.getElementById("mirrorSides");
+const calSliders = {
+  x: document.getElementById("calX"),
+  y: document.getElementById("calY"),
+  z: document.getElementById("calZ"),
+};
+const calOuts = {
+  x: document.getElementById("calXOut"),
+  y: document.getElementById("calYOut"),
+  z: document.getElementById("calZOut"),
+};
+const groupRow = document.getElementById("groupRow");
+const groupBtns = {};
+let activeGroup = "shoulders";
+
+for (const [g, { label }] of Object.entries(BONE_GROUPS)) {
+  const b = document.createElement("button");
+  b.className = "group-btn";
+  b.textContent = label;
+  b.onclick = () => selectGroup(g);
+  groupRow.appendChild(b);
+  groupBtns[g] = b;
+}
+
+function isTuned(g) {
+  const c = corrections[g];
+  return !!(c.x || c.y || c.z);
+}
+
+function refreshGroupBtns() {
+  for (const [g, b] of Object.entries(groupBtns)) {
+    b.classList.toggle("active", g === activeGroup);
+    b.classList.toggle("tuned", isTuned(g));
+  }
+}
+
+function selectGroup(g) {
+  activeGroup = g;
+  const c = corrections[g];
+  for (const ax of ["x", "y", "z"]) {
+    calSliders[ax].value = c[ax];
+    calOuts[ax].textContent = c[ax] + "°";
+  }
+  refreshGroupBtns();
+  // Freeze automatically: dragging a slider against 30fps playback tells you
+  // nothing, and forgetting to tick the box is the obvious first mistake.
+  const freeze = document.getElementById("freezeFrame");
+  if (motionData && !freeze.checked) {
+    freeze.checked = true;
+    log(`froze playback so ${BONE_GROUPS[g].label} can be judged on one pose`);
+  }
+  probeForced = false;
+  log(`editing ${BONE_GROUPS[g].label} — joints [${BONE_GROUPS[g].idx.join(", ")}]`);
+}
+
+for (const ax of ["x", "y", "z"]) {
+  calSliders[ax].oninput = () => {
+    const v = +calSliders[ax].value;
+    corrections[activeGroup][ax] = v;
+    calOuts[ax].textContent = v + "°";
+    refreshGroupBtns();
+  };
+}
+
+document.getElementById("resetCalBtn").onclick = () => {
+  corrections[activeGroup] = { x: 0, y: 0, z: 0 };
+  for (const ax of ["x", "y", "z"]) {
+    calSliders[ax].value = 0;
+    calOuts[ax].textContent = "0°";
+  }
+  refreshGroupBtns();
+  log(`reset ${BONE_GROUPS[activeGroup].label} to 0`);
+};
+
+// Export as source, not as a JSON blob: the end state of this tool is a table
+// pasted into the live page, so emit it in the shape it will be used in.
+document.getElementById("exportCalBtn").onclick = () => {
+  const conv = document.getElementById("axisConv").value;
+  const mode = document.getElementById("calMode").value;
+  const lines = [
+    `// Retarget calibration — SMPL-X → VRM`,
+    `// axis convention: ${conv}   mode: ${mode}   mirror: ${mirrorSides.checked}`,
+    `const AXIS_CONVENTION = ${JSON.stringify(conv)};`,
+    `const CORRECTION_MODE = ${JSON.stringify(mode)};`,
+    `const MIRROR_SIDES = ${mirrorSides.checked};`,
+    `const CORRECTIONS = {`,
+  ];
+  for (const [g, c] of Object.entries(corrections)) {
+    if (!isTuned(g)) continue;
+    lines.push(`  ${g}: { x: ${c.x}, y: ${c.y}, z: ${c.z} },   // ${BONE_GROUPS[g].label}`);
+  }
+  lines.push(`};`);
+  const text = lines.join("\n");
+
+  log("\n" + text, "ok");
+  navigator.clipboard?.writeText(text)
+    .then(() => statusEl.textContent = "Config copied to clipboard (also in the log below).")
+    .catch(() => statusEl.textContent = "Config written to the log below — copy it from there.");
+};
+
+mirrorSides.onchange = () =>
+  log(`mirroring ${mirrorSides.checked ? "on" : "off"} — right-side joints ` +
+      `${mirrorSides.checked ? "get Y,Z negated" : "use the same offsets"}`);
+
+selectGroup(activeGroup);
+
+
+// ---------------------------------------------------------------------------
+// SMPL-X kinematic tree. Needed to say "which way does this bone point" — a
+// bone's direction is the vector from its own joint to its child's, so the
+// parent table is what turns 55 loose joints into a skeleton.
+//
+// This is also the prerequisite for any forward kinematics later, on either
+// the avatar path or the robot path.
+// ---------------------------------------------------------------------------
+const SMPLX_PARENTS = [
+  -1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17,
+  18, 19, 15, 15, 15,
+  20, 25, 26, 20, 28, 29, 20, 31, 32, 20, 34, 35, 20, 37, 38,
+  21, 40, 41, 21, 43, 44, 21, 46, 47, 21, 49, 50, 21, 52, 53,
+];
+
+// child list, so a bone can find something to point at
+const SMPLX_CHILDREN = {};
+SMPLX_PARENTS.forEach((par, i) => {
+  if (par >= 0) (SMPLX_CHILDREN[par] ||= []).push(i);
+});
+
+// ---------------------------------------------------------------------------
+// Measure the VRM's rest pose.
+//
+// Half of the retarget correction is "how is this bone oriented when the model
+// is doing nothing", and that half is sitting inside the model file — no
+// registration, no download, no guessing. Read it and the hand-tuning stops
+// being necessary for this half of the problem.
+//
+// Two things get reported, and they answer different questions:
+//   - the normalized rest rotations, which three-vrm is supposed to make
+//     identity. If they aren't, the assumption the whole retarget rests on is
+//     already false and that alone explains the mess.
+//   - each bone's rest direction in world space, which IS the skeleton's
+//     geometry, and is what gets compared against SMPL-X's rest skeleton.
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// SMPL-X's rest skeleton, as directions.
+//
+// This is not a download — it's a property of how SMPL-X is defined. Its
+// forward kinematics chains rotations with no rest-rotation term:
+//
+//     transform[i] = transform[parent[i]] @ rodrigues(pose[i])
+//
+// so at zero pose every joint's orientation is identity and the skeleton is
+// the template's joint offsets: spine up, arms straight out along ±X (left is
+// +X), legs down, feet forward. That's all the correction needs.
+// ---------------------------------------------------------------------------
+const SMPLX_REST_DIR = {
+  0: [0, 1, 0], 3: [0, 1, 0], 6: [0, 1, 0], 9: [0, 1, 0], 12: [0, 1, 0],
+  13: [1, 0, 0], 14: [-1, 0, 0],          // collars
+  16: [1, 0, 0], 17: [-1, 0, 0],          // upper arms
+  18: [1, 0, 0], 19: [-1, 0, 0],          // forearms
+  20: [1, 0, 0], 21: [-1, 0, 0],          // hands
+  1: [0, -1, 0], 2: [0, -1, 0],           // thighs
+  4: [0, -1, 0], 5: [0, -1, 0],           // shins
+  7: [0, 0, 1], 8: [0, 0, 1],             // feet
+};
+for (let i = 25; i <= 39; i++) SMPLX_REST_DIR[i] = [1, 0, 0];   // left fingers
+for (let i = 40; i <= 54; i++) SMPLX_REST_DIR[i] = [-1, 0, 0];  // right fingers
+
+// Averaging a joint's children to get its direction breaks where the children
+// don't agree: the pelvis has three — two legs pointing down and the spine
+// pointing up — and their mean points down, reading as a 174° error when
+// nothing is wrong. Where the average misleads, name the child that defines
+// the bone instead.
+const REF_CHILD = { 0: 3 };     // pelvis follows the spine
+
+// Joints left out of the "how far off is this model" verdict. Not because
+// their correction is wrong, but because the reference direction here is
+// approximate — SMPL-X's toe sits forward *and* down, so a residual on the
+// feet measures this table, not the model.
+const VERDICT_SKIP = new Set([0, 7, 8]);
+
+// ---------------------------------------------------------------------------
+// Measure this model's rest pose and compute the correction from it.
+//
+// Replaces the sliders for the part that was never guessable. What it cannot
+// determine is twist about the bone's own axis — two skeletons can agree on
+// where the forearm points and still disagree on which way the elbow bends —
+// so the group sliders stay, but now they trim one residual instead of
+// standing in for the whole transform.
+// ---------------------------------------------------------------------------
+document.getElementById("measureRestBtn").onclick = () => {
+  playing = false;
+  if (audioEl) audioEl.pause();
+  document.getElementById("freezeFrame").checked = false;
+  probeForced = false;
+  resetPose();
+  vrm.update(0);
+  vrm.scene.updateMatrixWorld(true);
+
+  const specV = vrm.meta?.metaVersion ?? "(unknown)";
+  log("\n📐 Rest-pose measurement");
+  log(`   VRM spec ${specV}` + (specV === "0"
+      ? " — authored facing -Z. The loader turns the scene 180° so it faces the\n" +
+        "     camera, but that turn sits above the bones, so bone-local axes are\n" +
+        "     still -Z. That's read off the model below rather than guessed."
+      : " — +Z facing, same convention as SMPL-X."));
+
+  autoCorr = {}; parentRestInv = {};
+  const _from = new THREE.Vector3(), _to = new THREE.Vector3();
+  const _pw = new THREE.Quaternion(), _tmp = new THREE.Vector3();
+  const rows = [];
+  let maxDev = 0, maxName = "";
+
+  for (let i = 0; i < 55; i++) {
+    const node = boneNodes[i];
+    if (!node) continue;
+
+    // The frame conversion: a local quaternion acts in the parent's frame.
+    if (node.parent) {
+      node.parent.getWorldQuaternion(_pw);
+      parentRestInv[i] = _pw.clone().invert();
+    } else {
+      parentRestInv[i] = new THREE.Quaternion();
+    }
+
+    const target = SMPLX_REST_DIR[i];
+    const ref = REF_CHILD[i];
+    const kids = (ref !== undefined && boneNodes[ref])
+      ? [ref]
+      : (SMPLX_CHILDREN[i] || []).filter((k) => boneNodes[k]);
+    if (!target || !kids.length) continue;
+
+    // Where this bone actually points, in world space. Averaging the children
+    // matters at the wrist, which has five of them.
+    node.getWorldPosition(_from);
+    _to.set(0, 0, 0);
+    for (const k of kids) { boneNodes[k].getWorldPosition(_tmp); _to.add(_tmp); }
+    _to.divideScalar(kids.length).sub(_from);
+    if (_to.lengthSq() < 1e-12) continue;
+    _to.normalize();
+
+    // Swing-only: the shortest rotation carrying this model's rest direction
+    // onto SMPL-X's. Deliberately no twist component — there is no information
+    // in a direction about rotation around itself, and inventing one here
+    // would be the same guessing the sliders were doing.
+    const want = new THREE.Vector3(...target);
+    const qWorld = new THREE.Quaternion().setFromUnitVectors(_to, want);
+
+    // Expressed in the bone's local frame, which is where it gets applied.
+    autoCorr[i] = parentRestInv[i].clone()
+      .multiply(qWorld)
+      .multiply(parentRestInv[i].clone().invert());
+
+    const dev = 2 * Math.acos(Math.min(1, Math.abs(qWorld.w))) * 180 / Math.PI;
+    if (dev > maxDev && !VERDICT_SKIP.has(i)) { maxDev = dev; maxName = SMPLX_TO_VRM[i]; }
+    if (i <= 21) rows.push([i, SMPLX_TO_VRM[i], _to.toArray(), target, dev]);
+  }
+
+  const f = (v) => (v >= 0 ? " " : "") + v.toFixed(2);
+  log("\n   bone                  this model      SMPL-X rest     off by");
+  for (const [i, name, got, want, dev] of rows) {
+    log(`   ${String(i).padStart(2)} ${name.padEnd(18)} ` +
+        `${got.map(f).join(" ")}   ${want.map(f).join(" ")}   ${dev.toFixed(1)}°`);
+  }
+
+  // The verdict, which is the whole reason for measuring.
+  log(`\n   largest rest-pose difference: ${maxDev.toFixed(1)}° (${maxName})` +
+      `   [pelvis and feet excluded — see VERDICT_SKIP]`);
+  if (maxDev < 8) {
+    log("   → this model is in SMPL-X's own rest pose. So the rest pose was never\n" +
+        "     the problem, and everything left is the frame conversion, which\n" +
+        "     'auto' now reads off the model instead of guessing.", "ok");
+  } else if (maxDev < 25) {
+    log("   → close to SMPL-X's rest pose, with the usual few degrees of\n" +
+        "     authoring difference. Fitted out; not the main error.", "ok");
+  } else if (maxDev < 70) {
+    log("   → A-pose rather than T-pose. That offset was on every frame; it is\n" +
+        "     now computed per bone instead of dialled in by hand.", "ok");
+  } else {
+    log("   → too large to be a rest-pose difference. Check the bone mapping\n" +
+        "     for that joint before trusting the fit.", "bad");
+  }
+
+  document.getElementById("axisConv").value = "auto";
+  document.getElementById("useAutoFit").checked = true;
+
+  // Clear the hand-tuned offsets: they existed to cancel exactly what has just
+  // been computed properly, so leaving them in would double the correction.
+  for (const g of Object.keys(corrections)) corrections[g] = { x: 0, y: 0, z: 0 };
+  selectGroup(activeGroup);
+
+  log(`\n   ${Object.keys(autoCorr).length} bones fitted, sliders cleared.`);
+  log("   The sliders now trim twist only — leave them at 0 until you see a" +
+      "\n   limb bending the right amount in the wrong plane.");
+  statusEl.textContent = "Rest pose fitted. Press Play and watch the motion.";
+};
+
+function b64ToFloat32(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Float32Array(bytes.buffer);
+}
+
+// Startup last, so every binding above exists.
+animate();
+if (location.protocol === "file:") {
+  overlayText.innerHTML =
+    `<b>Open through a local server, not from disk.</b><br><br>` +
+    `<code>python -m http.server 8000</code><br>then ` +
+    `<code>http://localhost:8000/${location.pathname.split("/").pop()}</code>`;
+}
+</script>
+</body>
+</html>
