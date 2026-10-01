@@ -238,7 +238,7 @@ from scipy.spatial.transform import Rotation as _R  # noqa: E402
 HEAD_CHAIN = [0, 3, 6, 9, 12, 15]   # pelvis, spine1-3, neck, head
 head_rot = np.tile(np.eye(3), (n, 1, 1))
 for j in HEAD_CHAIN:
-    rv = np.zeros((n, 3), np.float32) if (j == 0 and not args.use_global) else poses[:, j*3:j*3+3]
+    rv = np.zeros((n, 3), np.float32) if j == 0 else poses[:, j*3:j*3+3]
     head_rot = np.matmul(head_rot, _R.from_rotvec(rv).as_matrix())
 
 # Light temporal smoothing. Un-smoothed, the camera inherits every frame of
