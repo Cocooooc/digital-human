@@ -50,6 +50,9 @@ ap.add_argument("--chunk", type=int, default=60)
 ap.add_argument("--side-by-side", action="store_true",
                 help="body and face in one frame, so the two can be judged together")
 ap.add_argument("--no-render", action="store_true", help="measure and export only")
+ap.add_argument("--face-cam", default="lock", choices=["lock", "follow", "fixed"],
+                help="lock: ride the head so the face stays front-on (default); "
+                     "follow: track its position only; fixed: a static camera")
 args = ap.parse_args()
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -110,23 +113,45 @@ top = np.argsort(expr_std)[::-1][:8]
 print("    most active channels: " +
       ", ".join(f"#{i}({expr_std[i]:.3f})" for i in top))
 
-# The verdict, which is the whole reason for measuring first.
-lively_jaw = jaw_deg.std() > 1.0 and turns / max(duration, 1e-6) > 1.5
+# The verdict. Jaw and expression are judged separately, because this model
+# does not necessarily put mouth opening in the jaw joint: FLAME's expression
+# basis contains mouth shapes too, so a speaking face can show a quiet jaw
+# alongside a very loud expression vector.
+#
+# An earlier version of this check treated a quiet jaw as proof of a dead face
+# and announced "close to static" over data with 97 of 100 channels varying
+# strongly. Wrong, and confidently wrong — the kind of answer that sends a
+# project off to integrate a second model it does not need.
+# Rate, not amplitude. Measured on real EMAGE output the jaw opens at most
+# 2.5 degrees while reversing direction 7 times a second — unmistakably
+# syllable rate, and unmistakably small. An amplitude gate of 1 degree called
+# that face dead. What distinguishes speech from drift is how often the jaw
+# turns around, so that is what gets tested; amplitude is reported and left
+# to the eye.
+jaw_rate = turns / max(duration, 1e-6)
+lively_jaw = jaw_rate > 3.0
+n_strong = int((expr_std > 0.1).sum())
 lively_expr = int((expr_std > 0.01).sum()) >= 5
 print()
-if lively_jaw and lively_expr:
-    print("  → The face IS animating. Jaw moves at a speech-like rate and several\n"
-          "    expression channels vary. It was invisible because of framing, not\n"
-          "    because the data is empty — the close-up below should show it.")
+if lively_expr and lively_jaw:
+    print(f"  -> Both channels animate: the jaw reverses {jaw_rate:.1f} times a second\n"
+          f"     (syllable rate) and {n_strong}/100 expression channels vary strongly.\n"
+          "     Anything invisible before was rendering — framing, exposure, or a\n"
+          "     camera that did not follow the head — not missing data.")
+elif lively_expr:
+    print(f"  -> The expression vector carries it: {n_strong}/100 channels vary strongly\n"
+          "     while the jaw joint stays quiet. Normal for this model — FLAME's\n"
+          "     basis includes mouth shapes, so speech can live in the coefficients\n"
+          "     rather than the jaw rotation. The data is rich; judge it on the\n"
+          "     close-up render, not on the jaw number.")
 elif lively_jaw:
-    print("  → Jaw moves, expression channels barely do. That means lip-sync\n"
-          "    without emotion: usable for mouth shapes, thin for expression.\n"
-          "    This is the case where adding a face-specialist model earns its keep.")
+    print("  -> Jaw moves, expression channels barely do. Lip-sync without emotion:\n"
+          "     usable for mouth shapes, thin for expression. This is the case where\n"
+          "     a face-specialist model earns its keep.")
 else:
-    print("  → The face is close to static. No camera fixes this; the face has to\n"
-          "    come from somewhere else (Audio2Face) or from a different EMAGE\n"
-          "    configuration. Check this against a longer, more expressive clip\n"
-          "    before concluding — a 5s sample can under-represent.")
+    print("  -> Both channels are close to flat. No camera fixes this; the face has\n"
+          "     to come from elsewhere (Audio2Face) or a different EMAGE config.\n"
+          "     Re-check on a longer clip first — 5s can under-represent.")
 
 
 # ---------------------------------------------------------------------------
@@ -198,8 +223,34 @@ for s in range(0, n, args.chunk):
     print(f"  frames {s}-{s+b}")
 
 vertices = np.concatenate(verts, 0)
-head_pos = np.concatenate(heads, 0).mean(axis=0)
+head_track = np.concatenate(heads, 0)              # (n, 3), per frame
+head_pos = head_track.mean(axis=0)
 print(f"  {vertices.shape} in {time.time()-t0:.1f}s")
+
+# Where the head is pointing, per frame. A face close-up on a static camera
+# does not survive this data: EMAGE pitches the head far enough down that it
+# leaves a fixed frame entirely. Chaining the rotations along the spine gives
+# the head's world orientation, and a camera placed in that frame keeps the
+# face front-on no matter where it turns — which is what makes the expression
+# judgeable rather than confounded with head pose.
+from scipy.spatial.transform import Rotation as _R  # noqa: E402
+
+HEAD_CHAIN = [0, 3, 6, 9, 12, 15]   # pelvis, spine1-3, neck, head
+head_rot = np.tile(np.eye(3), (n, 1, 1))
+for j in HEAD_CHAIN:
+    rv = np.zeros((n, 3), np.float32) if (j == 0 and not args.use_global) else poses[:, j*3:j*3+3]
+    head_rot = np.matmul(head_rot, _R.from_rotvec(rv).as_matrix())
+
+# Light temporal smoothing. Un-smoothed, the camera inherits every frame of
+# head jitter and the result is unwatchable even though each frame is correct.
+def _smooth(a, k=5):
+    pad = np.concatenate([a[:1]] * (k // 2) + [a] + [a[-1:]] * (k // 2), 0)
+    return np.stack([pad[i:i + k].mean(0) for i in range(len(a))])
+
+head_track_s = _smooth(head_track)
+head_rot_s = _R.from_matrix(_smooth(head_rot).reshape(-1, 3, 3)).as_matrix()
+print(f"  head pitch over the clip: "
+      f"{np.degrees(np.arctan2(-head_rot[:,2,1], head_rot[:,2,2])).ptp():.0f}° of range")
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +262,18 @@ import imageio  # noqa: E402
 
 S = args.size
 YFOV = np.pi / 4
+
+
+def _look_rot(eye, target, up=(0.0, 1.0, 0.0)):
+    """Rotation for a camera at `eye` aimed at `target`. pyrender cameras and
+    lights look down their local -Z."""
+    f = np.asarray(eye, float) - np.asarray(target, float)
+    f /= max(np.linalg.norm(f), 1e-9)
+    r = np.cross(np.asarray(up, float), f)
+    if np.linalg.norm(r) < 1e-6:
+        r = np.array([1.0, 0.0, 0.0])
+    r /= np.linalg.norm(r)
+    return np.stack([r, np.cross(f, r), f], axis=1)
 
 
 def camera_at(centre, half_height):
@@ -227,9 +290,15 @@ body_cam_pose = camera_at(body_centre, float(max(hi - lo)) / 2 * 1.25)
 # A head is about 22cm tall. Framing 16cm of it fills the frame with face,
 # which is the whole point — the body shot had the head at ~8% of frame height.
 face_centre = head_pos + np.array([0.0, 0.04, 0.0])
+FACE_DIST = 0.16 / np.tan(YFOV / 2)      # 16cm of head fills the frame
 face_cam_pose = camera_at(face_centre, 0.16)
 
-scene = pyrender.Scene(bg_color=[0.09, 0.09, 0.11, 1.0], ambient_light=[0.3] * 3)
+# Exposure matters more here than anywhere else in this project. An earlier
+# pass used a bright base colour with strong lights and clipped the face to
+# flat white — and expression lives entirely in shallow creases around the
+# mouth and eyes, which are the first thing blown highlights erase. Dimmer
+# ambient plus a mid-grey material keeps those gradients inside range.
+scene = pyrender.Scene(bg_color=[0.09, 0.09, 0.11, 1.0], ambient_light=[0.12] * 3)
 body_cam = scene.add(pyrender.PerspectiveCamera(yfov=YFOV, aspectRatio=1.0),
                      pose=body_cam_pose)
 face_cam = scene.add(pyrender.PerspectiveCamera(yfov=YFOV, aspectRatio=1.0),
@@ -237,13 +306,20 @@ face_cam = scene.add(pyrender.PerspectiveCamera(yfov=YFOV, aspectRatio=1.0),
 
 # Light from slightly above and to the side of the face: flat frontal light
 # flattens exactly the shallow creases that make an expression readable.
+# Key from above and to one side: frontal light flattens exactly the creases
+# that carry the expression. Fill opposite it, well below the key, so the
+# shadow side stays readable without washing the modelling back out.
 key = np.eye(4)
-key[:3, 3] = face_centre + np.array([0.35, 0.45, 0.8])
-scene.add(pyrender.DirectionalLight(intensity=3.5), pose=key)
-scene.add(pyrender.DirectionalLight(intensity=1.6), pose=body_cam_pose)
+key[:3, 3] = face_centre + np.array([0.45, 0.55, 0.75])
+key[:3, :3] = _look_rot(key[:3, 3], face_centre)
+scene.add(pyrender.DirectionalLight(intensity=2.2), pose=key)
+fill = np.eye(4)
+fill[:3, 3] = face_centre + np.array([-0.6, 0.1, 0.6])
+fill[:3, :3] = _look_rot(fill[:3, 3], face_centre)
+scene.add(pyrender.DirectionalLight(intensity=0.7), pose=fill)
 
 material = pyrender.MetallicRoughnessMaterial(
-    baseColorFactor=[0.68, 0.70, 0.76, 1.0], metallicFactor=0.0, roughnessFactor=0.6)
+    baseColorFactor=[0.52, 0.54, 0.60, 1.0], metallicFactor=0.0, roughnessFactor=0.7)
 
 W = S * 2 if args.side_by_side else S
 renderer = pyrender.OffscreenRenderer(S, S)
@@ -259,6 +335,17 @@ for i in range(n):
     if node is not None:
         scene.remove_node(node)
     node = scene.add(mesh)
+
+    if args.face_cam != "fixed":
+        # Ride the head: position always, orientation too when locked. The
+        # offset is expressed in the head's own frame, so "in front of the
+        # face" stays in front of the face however the head turns.
+        Rh = head_rot_s[i] if args.face_cam == "lock" else np.eye(3)
+        eye = head_track_s[i] + Rh @ np.array([0.0, 0.04, FACE_DIST])
+        pose = np.eye(4)
+        pose[:3, 3] = eye
+        pose[:3, :3] = _look_rot(eye, head_track_s[i] + Rh @ np.array([0.0, 0.04, 0.0]))
+        face_cam.matrix = pose
 
     scene.main_camera_node = face_cam
     face_img, _ = renderer.render(scene)
