@@ -19,7 +19,7 @@
 #   No Qwen3-TTS. The Chinese TTS stack was replaced by Kokoro; downloading it
 #     costs several GB for nothing.
 #
-# Usage, on a fresh box:
+# Usage, on a fresh box (GCP: `sudo -i` first; phase 0 installs conda+torch):
 #     apt update && apt install -y git
 #     cd /root && git clone https://github.com/Cocooooc/digital-human.git
 #     cd digital-human && bash restore.sh
@@ -41,6 +41,9 @@ STAMPS=/root/.restore_done
 ENV_NAME=pantomatrix
 
 mkdir -p "$STAMPS"
+# Ubuntu 22.04 cloud images ship needrestart, whose dialog would hang apt.
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+export CONDA_PLUGINS_AUTO_ACCEPT_TOS=yes
 REDO=""
 [ "${1:-}" = "--redo" ] && REDO="${2:-}"
 
@@ -58,9 +61,55 @@ phase() {           # phase <n> <name>; returns 1 if it should be skipped
   PHASE_T0=$(date +%s)
   return 0
 }
-done_phase() { touch "$STAMPS/$1"; ok "phase $1 done in $(( $(date +%s) - PHASE_T0 ))s"; }
+# A phase is only "done" if the thing it was supposed to produce exists.
+# Without this check a phase whose command silently did nothing — as happened
+# when a hub upgrade renamed huggingface-cli out from under phase 6 — still
+# gets stamped, and the summary reports 8/8 over a missing 600MB of weights.
+done_phase() {
+  local n="$1" proof="${2:-}"
+  if [ -n "$proof" ] && [ ! -e "$proof" ]; then
+    warn "phase $n did NOT produce $proof — not marking done, re-run to retry"
+    return 1
+  fi
+  touch "$STAMPS/$n"
+  ok "phase $n done in $(( $(date +%s) - PHASE_T0 ))s"
+}
 
 T0=$(date +%s)
+
+# ---------------------------------------------------------------------------
+# Fresh cloud VM (GCP etc.): no conda, no torch, and outside China the
+# mirrors below are slower than the originals. The rented servers this was
+# written on came with /root/miniconda3 and a CUDA torch preinstalled.
+if [ "$(id -u)" != 0 ]; then echo "run as root:  sudo -i  then  bash restore.sh"; exit 1; fi
+if phase 0 "Bootstrap (Miniconda + base torch)"; then
+  if [ ! -x /root/miniconda3/bin/conda ]; then
+    # py310 build: Kokoro and the conversation stack want 3.10, and the
+    # latest Miniconda ships 3.13.
+    wget -q -O /root/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-py310_24.7.1-0-Linux-x86_64.sh \
+      || wget -q -O /root/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+    bash /root/miniconda.sh -b -p /root/miniconda3 && rm -f /root/miniconda.sh
+    /root/miniconda3/bin/conda init bash >/dev/null
+  else
+    ok "miniconda already at /root/miniconda3"
+  fi
+  export PATH=/root/miniconda3/bin:$PATH
+  conda tos accept >/dev/null 2>&1 || true   # newer conda refuses to run until accepted
+  PYV=$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+  ok "base python $PYV"
+  case "$PYV" in 3.10|3.11|3.12) ;; *) warn "base python $PYV — Kokoro needs 3.10–3.12; run: conda install -y python=3.10";; esac
+  python -c "import torch" 2>/dev/null || pip install -q torch torchvision torchaudio
+  python -c "import torch; assert torch.cuda.is_available(); print('  base torch', torch.__version__, '| GPU', torch.cuda.get_device_name(0))" \
+    && done_phase 0 || warn "torch cannot see the GPU — check nvidia-smi first"
+fi
+[ -x /root/miniconda3/bin/conda ] && export PATH=/root/miniconda3/bin:$PATH
+
+# Pick download sources by reachability rather than by guessing the region.
+if curl -s -m 6 -o /dev/null https://huggingface.co; then
+  INTL=1; ok "huggingface.co reachable — downloading from the originals"
+else
+  INTL=0; ok "huggingface.co unreachable — using hf-mirror / modelscope"
+fi
 
 # ---------------------------------------------------------------------------
 if phase 1 "System packages"; then
@@ -79,7 +128,7 @@ fi
 # ---------------------------------------------------------------------------
 if phase 2 "Conversation stack (base env)"; then
   python -c "import torch; print('  base torch', torch.__version__, '| cuda', torch.cuda.is_available())"
-  pip install -q -U transformers accelerate modelscope soundfile \
+  pip install -q -U "transformers>=4.51,<5" "huggingface_hub<1.0" accelerate modelscope soundfile \
       faster-whisper kokoro fastapi uvicorn python-multipart requests
   # A pip install has silently replaced torch with a CPU build on this project
   # before; if that happened, everything downstream would be slow and it would
@@ -93,10 +142,14 @@ if phase 3 "LLM weights (~8GB)"; then
   if [ -d "$LLM" ] && [ -n "$(ls -A "$LLM" 2>/dev/null)" ]; then
     ok "$LLM already present"
   else
-    modelscope download --model Qwen/Qwen3-4B --local_dir "$LLM"
+    if [ "$INTL" = 1 ]; then
+      python -c "from huggingface_hub import snapshot_download as d; d('Qwen/Qwen3-4B', local_dir='$LLM')"
+    else
+      modelscope download --model Qwen/Qwen3-4B --local_dir "$LLM"
+    fi
   fi
   du -sh "$LLM" | sed 's/^/  /'
-  done_phase 3
+  done_phase 3 "$LLM/config.json"
 fi
 
 # ---------------------------------------------------------------------------
@@ -107,7 +160,7 @@ if phase 4 "PantoMatrix repo"; then
     git clone --depth 1 https://github.com/PantoMatrix/PantoMatrix.git "$PANTO"
   fi
   ls "$PANTO" | head -8 | sed 's/^/  /'
-  done_phase 4
+  done_phase 4 "$PANTO/test_emage_audio.py"
 fi
 
 # ---------------------------------------------------------------------------
@@ -126,9 +179,16 @@ if phase 5 "EMAGE environment (isolated py39)"; then
   python -c "import torch; from torchvision.ops import nms; assert torch.cuda.is_available()" \
     && ok "torch/torchvision ABI match" || warn "torchvision mismatch — reinstall all three together"
 
-  pip install -q "numpy==1.23.5" librosa soundfile smplx ConfigArgParse igraph \
-      huggingface_hub tqdm opencv-python scipy transformers einops omegaconf \
+  # huggingface_hub pinned below 1.0: transformers 4.57 requires <1.0, and hub
+  # 1.x renames enough of the API that the mismatch surfaces only when a model
+  # is loaded, with an error that never mentions huggingface_hub. The 0.x line
+  # also still ships the `huggingface-cli` command that phase 6 calls; 1.x
+  # renamed it to `hf`.
+  pip install -q "numpy==1.23.5" "huggingface_hub[cli]<1.0" \
+      librosa soundfile smplx ConfigArgParse igraph \
+      tqdm opencv-python scipy transformers einops omegaconf \
       fastapi uvicorn python-multipart
+  python -c "import transformers, huggingface_hub as h; print('  transformers', transformers.__version__, '| hub', h.__version__)"
   python -c "import numpy; print('  numpy', numpy.__version__)"
   conda deactivate
   done_phase 5
@@ -141,14 +201,15 @@ if phase 6 "EMAGE weights (~613MB)"; then
     ok "already downloaded"
   else
     # hf-mirror is roughly 10x faster from this region.
-    export HF_ENDPOINT=https://hf-mirror.com
-    pip install -q -U "huggingface_hub[cli]"
+    [ "$INTL" = 1 ] || export HF_ENDPOINT=https://hf-mirror.com
+    # Deliberately NOT upgrading huggingface_hub here — an unpinned upgrade at
+    # this point is exactly what broke transformers on the previous run.
     huggingface-cli download H-Liu1997/emage_audio --local-dir "$WEIGHTS" \
       || warn "download failed — retry, or unset HF_ENDPOINT to use huggingface.co"
   fi
   du -sh "$WEIGHTS" 2>/dev/null | sed 's/^/  /'
   conda deactivate
-  done_phase 6
+  done_phase 6 "$WEIGHTS/pytorch_model.bin"
 fi
 
 # ---------------------------------------------------------------------------
@@ -164,7 +225,7 @@ if phase 7 "SMPL-X body model (167MB)"; then
   # smplx.create() looks for the undated name; the renderer reads the dated one.
   ln -sf SMPLX_NEUTRAL_2020.npz "$SMPLX_DIR/SMPLX_NEUTRAL.npz"
   ls -lh "$SMPLX_DIR" | tail -2 | sed 's/^/  /'
-  done_phase 7
+  done_phase 7 "$SMPLX_DIR/SMPLX_NEUTRAL_2020.npz"
 fi
 
 # ---------------------------------------------------------------------------
@@ -199,7 +260,7 @@ PY
     warn "no offscreen backend — rendering will fail; send the errors above"
   fi
   conda deactivate
-  done_phase 8
+  done_phase 8 /root/.render_env
 fi
 
 # ---------------------------------------------------------------------------
@@ -213,6 +274,25 @@ check "SMPL-X"            "$SMPLX_DIR/SMPLX_NEUTRAL_2020.npz"
 check "LLM"               "$LLM"
 check "render backend"    "/root/.render_env"
 conda env list | grep -q "^${ENV_NAME} " && ok "conda env ${ENV_NAME}" || warn "MISSING: conda env"
+
+# Version compatibility, asserted here rather than discovered at model load.
+conda activate ${ENV_NAME} 2>/dev/null && {
+  python - <<VERCHK || true
+import importlib
+def v(m):
+    try: return importlib.import_module(m).__version__
+    except Exception as e: return "MISSING"
+tt, tv, hv, nv = v("torch"), v("transformers"), v("huggingface_hub"), v("numpy")
+print(f"  torch {tt} | transformers {tv} | hub {hv} | numpy {nv}")
+bad = []
+if not hv.startswith("0."): bad.append("huggingface_hub must be < 1.0 for transformers 4.57")
+if not nv.startswith("1.23"): bad.append("numpy must stay 1.23.x for PantoMatrix")
+if tt[:3] < "2.6": bad.append("torch must be >= 2.6 (CVE-2025-32434 blocks .bin loading)")
+for b in bad: print("  ! " + b)
+print("  versions compatible" if not bad else "  ^ fix the above before running EMAGE")
+VERCHK
+  conda deactivate
+}
 
 cat <<TXT
 

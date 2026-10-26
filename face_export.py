@@ -50,6 +50,11 @@ ap.add_argument("--chunk", type=int, default=60)
 ap.add_argument("--side-by-side", action="store_true",
                 help="body and face in one frame, so the two can be judged together")
 ap.add_argument("--no-render", action="store_true", help="measure and export only")
+ap.add_argument("--keep-root", action="store_true",
+                help="keep the global orientation instead of zeroing it. Use with the "
+                     "*_rootfix / *_tuned variants from evaluate_shortcomings.py: zeroing "
+                     "it drops EMAGE's ~19 degree backward pelvis tilt and the head "
+                     "ends up ~27 degrees down")
 ap.add_argument("--face-cam", default="lock", choices=["lock", "follow", "fixed"],
                 help="lock: ride the head so the face stays front-on (default); "
                      "follow: track its position only; fixed: a static camera")
@@ -213,7 +218,7 @@ for s in range(0, n, args.chunk):
             betas=(torch.from_numpy(betas).to(DEVICE).unsqueeze(0).repeat(b, 1)
                    if betas is not None else z(300)),
             transl=z(3), expression=torch.from_numpy(expr[s:s + b]).to(DEVICE),
-            global_orient=z(3), body_pose=p[:, 3:66], jaw_pose=p[:, 66:69],
+            global_orient=p[:, 0:3] if args.keep_root else z(3), body_pose=p[:, 3:66], jaw_pose=p[:, 66:69],
             leye_pose=p[:, 69:72], reye_pose=p[:, 72:75],
             left_hand_pose=p[:, 75:120], right_hand_pose=p[:, 120:165])
     verts.append(o.vertices.cpu().numpy())
@@ -238,7 +243,7 @@ from scipy.spatial.transform import Rotation as _R  # noqa: E402
 HEAD_CHAIN = [0, 3, 6, 9, 12, 15]   # pelvis, spine1-3, neck, head
 head_rot = np.tile(np.eye(3), (n, 1, 1))
 for j in HEAD_CHAIN:
-    rv = np.zeros((n, 3), np.float32) if j == 0 else poses[:, j*3:j*3+3]
+    rv = np.zeros((n, 3), np.float32) if (j == 0 and not args.keep_root) else poses[:, j*3:j*3+3]
     head_rot = np.matmul(head_rot, _R.from_rotvec(rv).as_matrix())
 
 # Light temporal smoothing. Un-smoothed, the camera inherits every frame of
