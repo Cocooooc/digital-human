@@ -58,6 +58,19 @@ ap.add_argument("--keep-root", action="store_true",
 ap.add_argument("--face-cam", default="lock", choices=["lock", "follow", "fixed"],
                 help="lock: ride the head so the face stays front-on (default); "
                      "follow: track its position only; fixed: a static camera")
+ap.add_argument("--face-half", type=float, default=0.12,
+                help="metres of head shown from the centre to the top edge of the face "
+                     "panel; smaller is closer. 0.16 was the old framing, in which the "
+                     "eyes were too small to follow")
+ap.add_argument("--label", default=None,
+                help="text burned into the top-left corner (default: the file name), "
+                     "so side-by-side comparisons cannot be mixed up")
+ap.add_argument("--view", default="face", choices=["face", "upper"],
+                help="single-panel framing when --side-by-side is off. face: the "
+                     "head-locked close-up; upper: a steady waist-up shot, for "
+                     "presentation videos")
+ap.add_argument("--no-eye-colour", action="store_true",
+                help="render the eyeballs in skin grey like before")
 args = ap.parse_args()
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -204,6 +217,7 @@ if betas is not None and betas.ndim == 2:
     betas = betas[0]
 
 verts, heads = [], []
+eye_info = None
 t0 = time.time()
 for s in range(0, n, args.chunk):
     p = torch.from_numpy(poses[s:s + args.chunk]).to(DEVICE)
@@ -221,6 +235,23 @@ for s in range(0, n, args.chunk):
             global_orient=p[:, 0:3] if args.keep_root else z(3), body_pose=p[:, 3:66], jaw_pose=p[:, 66:69],
             leye_pose=p[:, 69:72], reye_pose=p[:, 72:75],
             left_hand_pose=p[:, 75:120], right_hand_pose=p[:, 120:165])
+    if eye_info is None:
+        # Eyeball vertices are the ones skinned to the eye joints (SMPL-X 23 =
+        # left eye, 24 = right eye). Taken from the rest-pose template, so the
+        # iris is placed where the eye looks at zero rotation (+Z) and then
+        # rides along with whatever rotation the eye joint gets.
+        W_ = model.lbs_weights.detach().cpu().numpy()
+        vt = model.v_template.detach().cpu().numpy()
+        owner = W_.argmax(1)
+        eye_info = []
+        for j in (23, 24):
+            idx = np.where((owner == j) & (W_.max(1) > 0.5))[0]
+            if len(idx):
+                c = vt[idx].mean(0)
+                d = vt[idx] - c
+                d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-9
+                ang = np.degrees(np.arccos(np.clip(d[:, 2], -1, 1)))
+                eye_info.append((idx, ang, float(np.linalg.norm(vt[idx] - c, axis=1).mean())))
     verts.append(o.vertices.cpu().numpy())
     heads.append(o.joints[:, 15].cpu().numpy())     # SMPL-X joint 15 = head
     del model
@@ -291,12 +322,17 @@ def camera_at(centre, half_height):
 lo, hi = vertices.reshape(-1, 3).min(0), vertices.reshape(-1, 3).max(0)
 body_centre = (lo + hi) / 2
 body_cam_pose = camera_at(body_centre, float(max(hi - lo)) / 2 * 1.25)
+# Waist-up: from ~70cm below the head joint to ~25cm above it, centred on the
+# head's average x so a sway does not drift out of frame. Static on purpose —
+# a camera that follows every sway looks hand-held.
+upper_centre = np.array([head_pos[0], head_pos[1] - 0.22, head_pos[2]])
+upper_cam_pose = camera_at(upper_centre, 0.50)
 
 # A head is about 22cm tall. Framing 16cm of it fills the frame with face,
 # which is the whole point — the body shot had the head at ~8% of frame height.
 face_centre = head_pos + np.array([0.0, 0.04, 0.0])
-FACE_DIST = 0.16 / np.tan(YFOV / 2)      # 16cm of head fills the frame
-face_cam_pose = camera_at(face_centre, 0.16)
+FACE_DIST = args.face_half / np.tan(YFOV / 2)
+face_cam_pose = camera_at(face_centre, args.face_half)
 
 # Exposure matters more here than anywhere else in this project. An earlier
 # pass used a bright base colour with strong lights and clipped the face to
@@ -308,6 +344,8 @@ body_cam = scene.add(pyrender.PerspectiveCamera(yfov=YFOV, aspectRatio=1.0),
                      pose=body_cam_pose)
 face_cam = scene.add(pyrender.PerspectiveCamera(yfov=YFOV, aspectRatio=1.0),
                      pose=face_cam_pose)
+upper_cam = scene.add(pyrender.PerspectiveCamera(yfov=YFOV, aspectRatio=1.0),
+                      pose=upper_cam_pose)
 
 # Light from slightly above and to the side of the face: flat frontal light
 # flattens exactly the shallow creases that make an expression readable.
@@ -323,8 +361,45 @@ fill[:3, 3] = face_centre + np.array([-0.6, 0.1, 0.6])
 fill[:3, :3] = _look_rot(fill[:3, 3], face_centre)
 scene.add(pyrender.DirectionalLight(intensity=0.7), pose=fill)
 
+# Eyes get their own colour through per-vertex colour. Before this the
+# eyeballs were the same grey as the face: the gaze model moved them, and
+# nothing on screen showed it.
+# pyrender multiplies the *lit* colour by the vertex colour, in linear space,
+# before gamma. So the material keeps the skin grey, skin vertices get 1.0
+# (unchanged from before), and the eye colours are multipliers: >1 brightens
+# the sclera past the skin, ~0.1 gives a dark iris. Checked on a test sphere
+# under this exact lighting.
 material = pyrender.MetallicRoughnessMaterial(
     baseColorFactor=[0.52, 0.54, 0.60, 1.0], metallicFactor=0.0, roughnessFactor=0.7)
+vcol = np.ones((vertices.shape[1], 4), np.float32)
+if not args.no_eye_colour:
+    if not eye_info:
+        print("  ! no eyeball vertices found (lbs weights on joints 23/24) — eyes stay grey")
+    for k, (idx, ang, rad) in enumerate(eye_info or []):
+        col = np.tile(np.float32([1.5, 1.45, 1.35, 1.0]), (len(idx), 1))   # sclera
+        col[ang < 30] = [0.10, 0.06, 0.04, 1.0]                            # iris
+        col[ang < 13] = [0.004, 0.004, 0.004, 1.0]                         # pupil
+        vcol[idx] = col
+        print(f"  eye {'LR'[k]}: {len(idx)} vertices, radius {rad*100:.2f} cm, "
+              f"iris {(ang < 30).sum()} / pupil {(ang < 13).sum()} vertices")
+
+try:
+    import cv2  # noqa: E402
+except ImportError:
+    cv2 = None
+LABEL = args.label if args.label is not None else stem
+
+
+def burn_label(img, text):
+    if cv2 is None or not text:
+        return img
+    img = np.array(img, copy=True)          # renderer output can be read-only
+    sc = S / 720
+    (w, h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.8 * sc, 2)
+    cv2.rectangle(img, (0, 0), (int(w + 24 * sc), int(h + 24 * sc)), (20, 20, 24), -1)
+    cv2.putText(img, text, (int(12 * sc), int(h + 12 * sc)), cv2.FONT_HERSHEY_SIMPLEX,
+                0.8 * sc, (235, 235, 235), 2, cv2.LINE_AA)
+    return img
 
 W = S * 2 if args.side_by_side else S
 renderer = pyrender.OffscreenRenderer(S, S)
@@ -336,7 +411,11 @@ t0 = time.time()
 node = None
 for i in range(n):
     tm = trimesh.Trimesh(vertices[i], faces, process=False)
-    mesh = pyrender.Mesh.from_trimesh(tm, material=material, smooth=True)
+    # Built from a Primitive rather than Mesh.from_trimesh: from_trimesh drops
+    # vertex colours whenever an explicit material is passed.
+    mesh = pyrender.Mesh([pyrender.Primitive(
+        positions=tm.vertices, normals=tm.vertex_normals, indices=faces,
+        color_0=vcol, material=material, mode=pyrender.constants.GLTF.TRIANGLES)])
     if node is not None:
         scene.remove_node(node)
     node = scene.add(mesh)
@@ -352,6 +431,14 @@ for i in range(n):
         pose[:3, :3] = _look_rot(eye, head_track_s[i] + Rh @ np.array([0.0, 0.04, 0.0]))
         face_cam.matrix = pose
 
+    if args.view == "upper" and not args.side_by_side:
+        scene.main_camera_node = upper_cam
+        frame = burn_label(renderer.render(scene)[0], LABEL)
+        writer.append_data(frame)
+        if i % 30 == 0 or i == n - 1:
+            el = time.time() - t0
+            print(f"  frame {i+1}/{n}  {el:.1f}s ({(i+1)/max(el,1e-6):.1f} fps)")
+        continue
     scene.main_camera_node = face_cam
     face_img, _ = renderer.render(scene)
     if args.side_by_side:
@@ -360,6 +447,7 @@ for i in range(n):
         frame = np.hstack([body_img, face_img])
     else:
         frame = face_img
+    frame = burn_label(frame, LABEL)
     writer.append_data(frame)
     if i % 30 == 0 or i == n - 1:
         el = time.time() - t0
