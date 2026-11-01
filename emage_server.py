@@ -9,8 +9,18 @@ over localhost. At RTF 0.012 the round trip costs more than the inference, and
 both are negligible against the ~1s conversation loop.
 
 Endpoints:
-  GET  /            health + what's loaded
-  POST /motion      upload wav → SMPL-X motion + FLAME expression
+  GET  /               health + what's loaded
+  POST /motion         upload wav → SMPL-X motion + FLAME expression
+                       ?session=<id>  continue that avatar's stream (default "default")
+                       &post=1        apply motion_post: x0.7 gestures, smooth seam (0 = raw EMAGE)
+                       &scale=0.7     gesture size, 1.0 = as generated
+  GET  /idle           ?session=<id>&seconds=2  idle motion (breathing, weight shift),
+                       continuous with whatever the session played last
+  POST /session/reset  ?session=<id>  forget the session's last pose
+
+Live use: call /motion for every sentence and /idle for every pause, with the
+same session id, and play the frames in order. motion_post.Session makes each
+chunk start exactly where the previous one ended.
 
 Motion is returned as base64-encoded float32 rather than JSON numbers: a 3s
 sentence is 90 frames × 165 floats, which as JSON text would be ~400KB of
@@ -33,7 +43,9 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, Query
+
+import motion_post as mp
 from fastapi.middleware.cors import CORSMiddleware
 
 REPO = Path("/root/PantoMatrix")
@@ -132,6 +144,31 @@ def generate_motion(audio_np: np.ndarray):
             get_global_motion=True, ref_trans=trans[:, 0])
 
 
+# Rest pose for damping and idle: the mean pose of the example clip generated
+# in one pass. Computed here rather than shipped as a file so it always
+# matches the loaded weights. Falls back to the first request's motion if the
+# example audio is missing.
+REST = None
+_EXAMPLE = REPO / "examples" / "audio" / "2_scott_0_103_103_28s.wav"
+if _EXAMPLE.exists():
+    import librosa
+    _a, _ = librosa.load(str(_EXAMPLE), sr=SR)
+    REST = mp.rest_pose_from(generate_motion(_a)["motion_axis_angle"][0].cpu().numpy())
+    print(f"rest pose from {_EXAMPLE.name}")
+else:
+    print(f"! {_EXAMPLE} missing — rest pose will come from the first request")
+
+SESSIONS = {}
+
+
+def get_session(sid, scale):
+    s = SESSIONS.get(sid)
+    if s is None:
+        s = SESSIONS[sid] = mp.Session(REST, scale=scale)
+    s.scale = scale
+    return s
+
+
 def to_b64(arr: np.ndarray) -> str:
     """float32 little-endian, so the browser can read it as a Float32Array
     with no per-number parsing."""
@@ -139,7 +176,9 @@ def to_b64(arr: np.ndarray) -> str:
 
 
 @app.post("/motion")
-async def motion(file: UploadFile = File(...)):
+async def motion(file: UploadFile = File(...), session: str = Query("default"),
+                 post: int = Query(1), scale: float = Query(0.7)):
+    global REST
     raw = await file.read()
 
     t0 = time.time()
@@ -163,6 +202,12 @@ async def motion(file: UploadFile = File(...)):
     translation = pred["trans"][0].cpu().numpy()          # (frames, 3)
     n_frames = motion.shape[0]
 
+    if post:
+        if REST is None:
+            REST = mp.rest_pose_from(motion)
+        motion, expression = get_session(session, scale).speak(motion, expression)
+        translation = np.zeros_like(translation)
+
     print(f"[MOTION] audio {duration:.2f}s → {n_frames} frames "
           f"| decode {t_decode:.3f}s infer {t_infer:.3f}s "
           f"| RTF {t_infer/max(duration, 1e-6):.3f}")
@@ -175,4 +220,23 @@ async def motion(file: UploadFile = File(...)):
         "expression": to_b64(expression),    # 100 per frame, FLAME
         "trans": to_b64(translation),        # 3 per frame
         "timing": {"decode": round(t_decode, 3), "infer": round(t_infer, 3)},
+        "post": {"applied": bool(post), "session": session, "scale": scale},
     }
+
+
+@app.get("/idle")
+def idle(session: str = Query("default"), seconds: float = Query(2.0)):
+    if REST is None:
+        return {"error": "no rest pose yet — send one /motion request first"}
+    n = max(1, int(round(seconds * POSE_FPS)))
+    scale = SESSIONS[session].scale if session in SESSIONS else 0.7
+    motion, expression = get_session(session, scale).idle(n)
+    return {"fps": POSE_FPS, "frames": n,
+            "motion": to_b64(motion), "expression": to_b64(expression),
+            "trans": to_b64(np.zeros((n, 3), np.float32))}
+
+
+@app.post("/session/reset")
+def reset(session: str = Query("default")):
+    SESSIONS.pop(session, None)
+    return {"reset": session}
