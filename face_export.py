@@ -69,6 +69,9 @@ ap.add_argument("--view", default="face", choices=["face", "upper"],
                 help="single-panel framing when --side-by-side is off. face: the "
                      "head-locked close-up; upper: a steady waist-up shot, for "
                      "presentation videos")
+ap.add_argument("--upper-half", type=float, default=0.62,
+                help="metres from frame centre to top edge in --view upper; larger = wider "
+                     "(0.50 cropped the hands during gestures)")
 ap.add_argument("--no-eye-colour", action="store_true",
                 help="render the eyeballs in skin grey like before")
 args = ap.parse_args()
@@ -325,8 +328,8 @@ body_cam_pose = camera_at(body_centre, float(max(hi - lo)) / 2 * 1.25)
 # Waist-up: from ~70cm below the head joint to ~25cm above it, centred on the
 # head's average x so a sway does not drift out of frame. Static on purpose —
 # a camera that follows every sway looks hand-held.
-upper_centre = np.array([head_pos[0], head_pos[1] - 0.22, head_pos[2]])
-upper_cam_pose = camera_at(upper_centre, 0.50)
+upper_centre = np.array([head_pos[0], head_pos[1] - 0.32, head_pos[2]])
+upper_cam_pose = camera_at(upper_centre, args.upper_half)
 
 # A head is about 22cm tall. Framing 16cm of it fills the frame with face,
 # which is the whole point — the body shot had the head at ~8% of frame height.

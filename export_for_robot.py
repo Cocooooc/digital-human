@@ -239,7 +239,12 @@ print(f"\n  {bundle}")
 # Plain .npy too: some pipelines will not unpack an npz.
 for name, arr in (("poses_absolute", poses_abs), ("poses", poses),
                   ("joint_positions", positions),
-                  ("joint_rotations_world", world.astype(np.float32))):
+                  ("joint_rotations_world", world.astype(np.float32)),
+                  # Face, as its own files (the teacher's request: expression
+                  # exported automatically next to the body, every time).
+                  ("expression_flame100", expr if expr is not None else np.zeros((n, 100), np.float32)),
+                  ("jaw_pose", poses[:, 66:69].astype(np.float32)),
+                  ("eye_pose", poses[:, 69:75].astype(np.float32))):
     f = out_dir / f"{stem}_{name}.npy"
     np.save(f, arr)
     print(f"  {f}   {arr.shape}")

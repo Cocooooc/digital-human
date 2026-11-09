@@ -14,6 +14,7 @@ Endpoints:
                        ?session=<id>  continue that avatar's stream (default "default")
                        &post=1        apply motion_post: x0.7 gestures, smooth seam (0 = raw EMAGE)
                        &scale=0.7     gesture size, 1.0 = as generated
+                       &mouth=1       apply mouth_post lip-sync fixes (needs post=1)
   GET  /idle           ?session=<id>&seconds=2  idle motion (breathing, weight shift),
                        continuous with whatever the session played last
   POST /session/reset  ?session=<id>  forget the session's last pose
@@ -46,6 +47,7 @@ import torch.nn.functional as F
 from fastapi import FastAPI, File, UploadFile, Query
 
 import motion_post as mp
+from mouth_post import fix_mouth
 from fastapi.middleware.cors import CORSMiddleware
 
 REPO = Path("/root/PantoMatrix")
@@ -177,7 +179,7 @@ def to_b64(arr: np.ndarray) -> str:
 
 @app.post("/motion")
 async def motion(file: UploadFile = File(...), session: str = Query("default"),
-                 post: int = Query(1), scale: float = Query(0.7)):
+                 post: int = Query(1), scale: float = Query(0.7), mouth: int = Query(1)):
     global REST
     raw = await file.read()
 
@@ -205,6 +207,10 @@ async def motion(file: UploadFile = File(...), session: str = Query("default"),
     if post:
         if REST is None:
             REST = mp.rest_pose_from(motion)
+        if mouth:
+            # lip-sync fixes from the audio: close in pauses, hold drawn-out
+            # vowels open, re-animate frozen stretches (mouth_post.py)
+            motion, expression, _ = fix_mouth(motion, expression, audio_np, SR, verbose=False)
         motion, expression = get_session(session, scale).speak(motion, expression)
         translation = np.zeros_like(translation)
 
