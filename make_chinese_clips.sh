@@ -10,10 +10,31 @@ cd /root/digital-human
 source /root/miniconda3/etc/profile.d/conda.sh
 OUT=/root/zh_clips
 
-# 1. Mandarin voice: Kokoro needs the Chinese G2P extra
-conda activate base
-python -c "import misaki.zh" 2>/dev/null || pip install -q "misaki[zh]"
-python make_chinese_clips.py tts --out $OUT
+# 1. Mandarin voice. Usage:
+#      bash make_chinese_clips.sh          Microsoft neural voice (edge-tts, natural; needs internet)
+#      bash make_chinese_clips.sh kokoro   offline Kokoro (flatter)
+#      bash make_chinese_clips.sh own      your own recordings, already uploaded as
+#                                          /root/zh_clips/wav/zh_01_intro.(wav|m4a|mp3) etc.
+ENGINE=${1:-edge}
+mkdir -p $OUT/wav
+if [ "$ENGINE" = "own" ]; then
+  for f in $OUT/wav/*.m4a $OUT/wav/*.mp3 $OUT/wav/*.MP3 $OUT/wav/*.M4A; do
+    [ -e "$f" ] || continue
+    ffmpeg -y -loglevel error -i "$f" -ac 1 -ar 24000 "${f%.*}.wav" && echo "  converted $(basename "$f")"
+  done
+  ls -l $OUT/wav/zh_0*.wav || { echo "  ! put your recordings in $OUT/wav first"; exit 1; }
+else
+  conda activate base
+  if [ "$ENGINE" = "edge" ]; then
+    pip install -q -U edge-tts
+    python make_chinese_clips.py tts --out $OUT --engine edge \
+      || { echo "  ! edge-tts failed (network?) — falling back to Kokoro"; ENGINE=kokoro; }
+  fi
+  if [ "$ENGINE" = "kokoro" ]; then
+    python -c "import misaki.zh" 2>/dev/null || pip install -q "misaki[zh]"
+    python make_chinese_clips.py tts --out $OUT --engine kokoro
+  fi
+fi
 
 # 2. motion (+ mouth fix, idle, gaze), raw kept for comparison
 conda activate pantomatrix

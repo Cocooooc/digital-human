@@ -58,6 +58,8 @@ ap.add_argument("stage", choices=["tts", "analyze"])
 ap.add_argument("--out", default="/root/lipsync")
 ap.add_argument("--voice", default="af_heart")
 ap.add_argument("--wav-dir", default="", help="extra recordings to check (any sample rate)")
+ap.add_argument("--post", action="store_true",
+                help="also run mouth_post.fix_mouth on every clip and report before -> after")
 ap.add_argument("--repo", default="/root/PantoMatrix")
 ap.add_argument("--weights", default="/root/emage_weights")
 ap.add_argument("--model-folder", default="/root/PantoMatrix/emage_evaltools/smplx_models")
@@ -250,9 +252,14 @@ def check_clip(name, a, sr, gap, base):
     # 3. open during silence
     for s, e in runs(~speech, int(0.3 * FPS)):
         inner = gap[s + 6:e] if e - s > 9 else gap[s:e]    # let it close (~0.2s)
-        if len(inner) and np.median(inner) > base["silence_gap_p90"]:
+        # Judged against a closed mouth, not against the baseline clips'
+        # own silences: the first GCP run showed the model keeps the mouth
+        # open in pauses in normal speech too, so a baseline-relative test
+        # could never fire.
+        if len(inner) and np.median(inner) > base["silence_open_mm"]:
             issues.append(("mouth open during silence", s, e,
-                           f"median gap {np.median(inner):.1f}mm (normal silence p90 {base['silence_gap_p90']:.1f})"))
+                           f"median gap {np.median(inner):.1f}mm (closed ~{base['closed_mm']:.1f}, "
+                           f"speech mean {base['speech_gap_mean']:.1f})"))
 
     # 4. lip closures (p/b/m need the lips to meet)
     closures = int(np.sum((gap[1:-1] < base["closed_mm"]) & (gap[1:-1] <= gap[:-2]) &
@@ -278,7 +285,7 @@ def check_clip(name, a, sr, gap, base):
     }, (db, speech, voiced, env)
 
 
-def plot_clip(path, name, gap, feats, res):
+def plot_clip(path, name, gap, feats, res, fixed=None, res_fixed=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -289,14 +296,21 @@ def plot_clip(path, name, gap, feats, res):
     ax[0].fill_between(t, 0, env.max(), where=voiced, color="#9cc3e6", alpha=0.35, label="voiced")
     ax[0].set_ylabel("loudness")
     ax[0].legend(loc="upper right", fontsize=8)
-    ax[1].plot(t, gap, color="#c0504d", lw=1.4)
+    if fixed is not None:
+        ax[1].plot(t, gap, color="#aaaaaa", lw=1.2, label="EMAGE raw")
+        ax[1].plot(t, fixed, color="#c0504d", lw=1.5, label="after mouth_post")
+        ax[1].legend(loc="upper right", fontsize=8)
+    else:
+        ax[1].plot(t, gap, color="#c0504d", lw=1.4)
     ax[1].set_ylabel("lip gap (mm)")
     ax[1].set_xlabel("seconds")
     for k in res["issues"]:
         if k["end_s"] - k["start_s"] < res["seconds"] - 0.1:
             ax[1].axvspan(k["start_s"], k["end_s"], color="#f2c14e", alpha=0.35)
-    ax[0].set_title(f"{name}   lag {res['lag_ms']} ms   corr {res['corr']}   "
-                    f"issues {len(res['issues'])}", fontsize=10)
+    title = f"{name}   lag {res['lag_ms']} ms   corr {res['corr']}   issues {len(res['issues'])}"
+    if res_fixed is not None:
+        title += f"  ->  {len(res_fixed['issues'])} after fix"
+    ax[0].set_title(title, fontsize=10)
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)
@@ -324,12 +338,18 @@ if args.wav_dir:
 for k in ("held_vowel", "held_vibrato", "drawl_vibrato"):
     sf.write(out / "wav" / f"{k}.wav", clips[k], sr)
 
-gaps = {}
+gaps, gaps_fixed = {}, {}
+if args.post:
+    from mouth_post import fix_mouth
 for cid, a in clips.items():
     poses, expr, _ = gen(a)
     gap, width = mouth_aperture(poses, expr)
     gaps[cid] = gap
     save_emage_npz(out / f"{cid}.npz", poses, expr, np.zeros((len(poses), 3)))
+    if args.post:
+        p2, e2, _ = fix_mouth(poses, expr, a, sr, verbose=False)
+        gaps_fixed[cid] = mouth_aperture(p2, e2)[0]
+        save_emage_npz(out / f"{cid}_fixed.npz", p2, e2, np.zeros((len(p2), 3)))
     jaw = np.degrees(np.linalg.norm(poses[:, 66:69], axis=1))
     print(f"  {cid:<14} {len(a) / sr:5.1f}s  lip gap {gap.min():4.1f}-{gap.max():4.1f}mm  "
           f"gap~jaw corr {np.corrcoef(gap, jaw)[0, 1]:.2f}")
@@ -357,7 +377,9 @@ base = {"win_std_p10": float(np.percentile(bw, 10)), "win_std_p50": float(np.per
         "frozen_std": 0.4 * float(np.percentile(bw, 50)),
         "speech_gap_p25": float(np.percentile(bs, 25)), "speech_gap_mean": float(np.mean(bs)),
         "closed_mm": float(np.percentile(bs, 5) + 0.15 * (np.percentile(bs, 50) - np.percentile(bs, 5))),
-        "silence_gap_p90": float(max(np.percentile(bsil, 90), np.percentile(bs, 10)))}
+        "silence_gap_p90": float(max(np.percentile(bsil, 90), np.percentile(bs, 10))),
+        "silence_gap_median": float(np.median(bsil))}
+base["silence_open_mm"] = base["closed_mm"] + 0.5 * (base["speech_gap_mean"] - base["closed_mm"])
 print("  baseline (normal speech): " + ", ".join(f"{k} {v:.2f}" for k, v in base.items()))
 
 report = {"baseline": {k: round(v, 2) for k, v in base.items()}, "landmark_sanity_corr": round(float(c), 2),
@@ -366,7 +388,12 @@ report = {"baseline": {k: round(v, 2) for k, v in base.items()}, "landmark_sanit
 for cid, a in clips.items():
     res, feats = check_clip(cid, a, sr, gaps[cid], base)
     report["clips"][cid] = res
-    plot_clip(out / "plots" / f"{cid}.png", cid, gaps[cid], feats, res)
+    if args.post:
+        rf, _ = check_clip(cid, a, sr, gaps_fixed[cid], base)
+        report.setdefault("clips_fixed", {})[cid] = rf
+        plot_clip(out / "plots" / f"{cid}.png", cid, gaps[cid], feats, res, gaps_fixed[cid], rf)
+    else:
+        plot_clip(out / "plots" / f"{cid}.png", cid, gaps[cid], feats, res)
 (out / "lipsync_report.json").write_text(json.dumps(report, indent=2))
 
 print("\n  clip            secs  lag ms  corr  frozen%  closures/s  chatter  issues")
@@ -378,6 +405,27 @@ worst = sorted(report["clips"].items(), key=lambda kv: -len(kv[1]["issues"]))
 for cid, r in worst:
     for k in r["issues"]:
         print(f"    {cid:<14} {k['start_s']:5.2f}-{k['end_s']:5.2f}s  {k['what']}: {k['detail']}")
+if args.post:
+    kinds = ["mouth static while speaking", "mouth open during silence", "closes during a held vowel",
+             "mouth flaps during a held vowel", "held vowel with mouth barely open"]
+    short = ["static", "open-silent", "held-close", "held-flap", "held-shut"]
+    print("\n  == before -> after mouth_post (issue counts) ==")
+    print("  clip           frozen%        " + "  ".join(f"{k:>11}" for k in short) + "   total")
+    tot_b = tot_a = 0
+    for cid in clips:
+        rb, ra = report["clips"][cid], report["clips_fixed"][cid]
+        cb = [sum(i["what"] == k for i in rb["issues"]) for k in kinds]
+        ca = [sum(i["what"] == k for i in ra["issues"]) for k in kinds]
+        tot_b += len(rb["issues"]); tot_a += len(ra["issues"])
+        print(f"  {cid:<14} {rb['frozen_speech_pct']:5.1f}->{ra['frozen_speech_pct']:5.1f}   "
+              + "  ".join(f"{b:>5}->{a:<4}" for b, a in zip(cb, ca))
+              + f"   {len(rb['issues'])}->{len(ra['issues'])}")
+    print(f"  all clips: {tot_b} issues -> {tot_a}")
+    print("  remaining after fix:")
+    for cid in clips:
+        for k in report["clips_fixed"][cid]["issues"]:
+            print(f"    {cid:<14} {k['start_s']:5.2f}-{k['end_s']:5.2f}s  {k['what']}: {k['detail']}")
+    (out / "lipsync_report.json").write_text(json.dumps(report, indent=2))
 print(f"\n  wrote {out}/lipsync_report.json, plots/*.png, <clip>.npz, wav/*.wav")
 top = [cid for cid, r in worst[:2] if r["issues"]]
 if top:
