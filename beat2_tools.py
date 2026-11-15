@@ -73,14 +73,14 @@ class Emage:
     frame's code unless the best code beats it by more than `margin` in
     log-probability. margin 0 is the official argmax."""
 
-    def __init__(self, repo, weights):
+    def __init__(self, repo, weights, vq_weights=None):
         import torch
         sys.path.insert(0, str(repo))
         from models.emage_audio import EmageAudioModel, EmageVQVAEConv, EmageVAEConv, EmageVQModel
         self.torch = torch
         self.dev = "cuda"
-        src = str(weights)
-        self.model = EmageAudioModel.from_pretrained(src).to(self.dev).eval()
+        src = str(vq_weights or weights)          # codebooks: always the released ones
+        self.model = EmageAudioModel.from_pretrained(str(weights)).to(self.dev).eval()
         parts = {k: EmageVQVAEConv.from_pretrained(src, subfolder=f"emage_vq/{k}").to(self.dev).eval()
                  for k in ("face", "upper", "hands", "lower")}
         self.vq = EmageVQModel(face_model=parts["face"], upper_model=parts["upper"],
