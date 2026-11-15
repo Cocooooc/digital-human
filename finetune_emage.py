@@ -24,6 +24,8 @@ Stages (pantomatrix env, from /root/digital-human):
 SPEAKER = BEAT2 number, e.g. 6 (carla), 4 (lawrence), 5 (stewart).
 """
 import argparse
+import importlib
+import importlib.util
 import json
 import os
 import sys
@@ -217,23 +219,51 @@ if args.stage == "prep":
 # =============================================================================
 # train
 # =============================================================================
+class _Stub(types.ModuleType):
+    """Stand-in for an optional package (logging, schedulers): any attribute is
+    a do-nothing callable, and it can have submodules (diffusers.optimization)."""
+    __path__ = []
+
+    def __getattr__(self, attr):
+        if attr.startswith("__"):
+            raise AttributeError(attr)
+        return lambda *a, **kw: None
+
+
+class _StubFinder:
+    roots = set()
+
+    def find_spec(self, name, path=None, target=None):
+        # importlib.util is imported at the top of the file: importing it here
+        # would re-enter this finder and recurse.
+        if name.split(".")[0] in self.roots:
+            return importlib.util.spec_from_loader(name, self)
+        return None
+
+    def create_module(self, spec):
+        return _Stub(spec.name)
+
+    def exec_module(self, module):
+        pass
+
+
 def import_trainer():
     """Import train_emage_audio.train_val_fn without running its main and
     without the logging/eval extras this box may not have installed."""
-    import importlib
+    finder = _StubFinder()
+    sys.meta_path.insert(0, finder)
     for _ in range(12):
         try:
             return importlib.import_module("train_emage_audio")
         except ModuleNotFoundError as e:
-            name = e.name
-            print(f"  (stubbing missing module '{name}' — only used for logging/eval)")
-            parts = name.split(".")
-            for k in range(1, len(parts) + 1):
-                sub = ".".join(parts[:k])
-                if sub not in sys.modules:
-                    m = types.ModuleType(sub)
-                    m.__getattr__ = lambda attr: (lambda *a, **kw: None)
-                    sys.modules[sub] = m
+            root = (e.name or "").split(".")[0]
+            if not root or root in finder.roots:
+                raise
+            print(f"  (stubbing missing module '{root}' — only used for logging/eval)")
+            finder.roots.add(root)
+            for k in [m for m in sys.modules if m == root or m.startswith(root + ".")]:
+                del sys.modules[k]
+            sys.modules.pop("train_emage_audio", None)
     raise SystemExit("could not import train_emage_audio")
 
 
