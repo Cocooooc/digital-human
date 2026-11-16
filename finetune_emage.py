@@ -58,6 +58,10 @@ import torch  # noqa: E402
 
 DEV = "cuda"
 FPS = 30
+# Ampere and newer (A800/A100/L4): TF32 matmuls, several times faster than
+# full fp32 with no effect worth measuring on this model. Ignored on a T4.
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 
 def load_vq():
